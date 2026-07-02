@@ -109,12 +109,14 @@ type model struct {
 	width    int
 	height   int
 
-	turnActive bool
-	toolStarts map[string]protocol.ResponseFrame
-	sawTool    bool
-	spinIdx    int
-	spinLabel  string
-	spinStart  time.Time
+	turnActive     bool
+	toolStarts     map[string]protocol.ResponseFrame
+	sawTool        bool
+	assistantBuf   string // accumulated delta text flushed before tool calls
+	flushedText    bool   // true if we already output assistant text from deltas
+	spinIdx        int
+	spinLabel      string
+	spinStart      time.Time
 
 	transcriptEntries *transcript.Transcript
 	selection         *transcript.Selection
@@ -262,21 +264,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.submit()
 
-	case tea.KeyCtrlP:
-		return m.historyUp(), nil
-	case tea.KeyCtrlN:
-		return m.historyDown(), nil
-
 	case tea.KeyUp:
-		if m.input.LineInfo().RowOffset == 0 {
-			m.viewport.LineUp(1)
-			return m, nil
+		if m.input.Value() == "" {
+			return m.historyUp(), nil
 		}
 	case tea.KeyDown:
-		li := m.input.LineInfo()
-		if li.RowOffset == li.Height-1 {
-			m.viewport.LineDown(1)
-			return m, nil
+		if m.input.Value() == "" {
+			return m.historyDown(), nil
 		}
 	}
 
@@ -289,6 +283,20 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // resizeInputToFit computes the visual line count of the input content
 // and sets the textarea height accordingly (clamped to inputMaxLines).
 // It also fixes the textarea's scroll offset which can drift on resize.
+func (m *model) flushAssistantBuf() {
+	if m.assistantBuf == "" {
+		return
+	}
+	// Add a spacer before assistant text if we've already output tool
+	// calls — visually separates tool results from the next prose block.
+	if m.sawTool {
+		m.appendEntry(&transcript.TranscriptEntry{Type: transcript.EntrySpacer, Raw: ""})
+	}
+	m.appendAssistantText(m.assistantBuf)
+	m.assistantBuf = ""
+	m.flushedText = true
+}
+
 func (m *model) resizeInputToFit() {
 	needed := m.inputVisualLines()
 	if needed < 1 {
@@ -391,6 +399,8 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.turnActive = true
 	m.toolStarts = map[string]protocol.ResponseFrame{}
 	m.sawTool = false
+	m.assistantBuf = ""
+	m.flushedText = false
 	m.spinIdx = 0
 	m.spinLabel = "Thinking"
 	m.spinStart = time.Now()
@@ -522,6 +532,9 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 	switch frame.Type {
 	case protocol.TypeDelta:
 		m.spinLabel = "Writing response"
+		if frame.Text != "" {
+			m.assistantBuf += frame.Text
+		}
 	case protocol.TypeTool:
 		m.sawTool = true
 		if frame.Status == protocol.StatusStart {
@@ -530,6 +543,9 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 			}
 			m.spinLabel = toolsLabel(m.toolStarts)
 		} else {
+			// Flush any assistant text that arrived before this tool result.
+			m.flushAssistantBuf()
+
 			var startFrame *protocol.ResponseFrame
 			if s, ok := m.toolStarts[frame.ID]; ok {
 				startFrame = &s
@@ -550,7 +566,10 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 	case protocol.TypeUsage:
 	case protocol.TypeDone:
 		m.turnActive = false
-		if frame.Text != "" {
+		m.flushAssistantBuf()
+		if frame.Text != "" && !m.flushedText {
+			// No delta-rendered text — the full text arrived in the
+			// done frame itself (e.g. cached/historical turn replay).
 			if m.sawTool {
 				m.appendEntry(&transcript.TranscriptEntry{Type: transcript.EntrySpacer, Raw: ""})
 			}

@@ -173,9 +173,7 @@ func formatToolList(data map[string]any) string {
 	return renderPlainTable(headers, rows)
 }
 
-// formatMessageHistory replays a session's stored messages into the same
-// visual form live turns use, for "/session switch" to show what was
-// actually said instead of just a message count.
+// formatMessageHistory replays stored messages mirroring live turn output.
 func formatMessageHistory(messages []map[string]any) string {
 	var b strings.Builder
 	for _, m := range messages {
@@ -188,64 +186,41 @@ func formatMessageHistory(messages []map[string]any) string {
 			b.WriteString(renderMarkdown(content))
 			b.WriteString("\n")
 		case "tool":
-			toolName := strField(m, "tool")
-			if toolName == "" {
-				toolName = strField(m, "tool_name")
+			name := strField(m, "name")
+			if name == "" {
+				name = strField(m, "tool_name")
 			}
-			if toolName == "" {
-				toolName = strField(m, "name")
+			if name == "" {
+				name = strField(m, "tool")
 			}
-			if toolName == "" {
-				toolName = "tool"
+			if name == "" {
+				name = "tool"
 			}
-			toolStatus := strField(m, "status")
-			snippet := toolHistorySnippet(m)
-			if toolStatus == "err" || toolStatus == "error" {
-				errText := strField(m, "error")
+			status := strField(m, "status")
+			errText := strField(m, "error")
+			snippet := strField(m, "snippet")
+			if snippet == "" {
+				snippet = strField(m, "result")
+			}
+			if snippet == "" {
+				snippet = compactJSONStr(content)
+			}
+
+			if status == "err" || status == "error" || errText != "" {
 				if errText == "" {
-					errText = strField(m, "content")
-				}
-				if errText == "" {
-					errText = "unknown error"
+					errText = content
 				}
 				if snippet != "" {
-					fmt.Fprintf(&b, "✗ %s · %s: %s\n", toolName, snippet, errText)
+					fmt.Fprintf(&b, "✗ %s · %s: %s\n", name, snippet, errText)
 				} else {
-					fmt.Fprintf(&b, "✗ %s: %s\n", toolName, errText)
+					fmt.Fprintf(&b, "✗ %s: %s\n", name, errText)
 				}
 			} else if snippet != "" {
-				fmt.Fprintf(&b, "✓ %s · %s\n", toolName, snippet)
+				fmt.Fprintf(&b, "✓ %s · %s\n", name, snippet)
 			} else {
-				fmt.Fprintf(&b, "✓ %s\n", toolName)
+				fmt.Fprintf(&b, "✓ %s\n", name)
 			}
 		}
 	}
 	return b.String()
-}
-
-// toolHistorySnippet tries to extract a human-readable summary from a
-// tool message in the history.
-func toolHistorySnippet(m map[string]any) string {
-	if s := strField(m, "snippet"); s != "" {
-		return s
-	}
-	// Try to extract from result field.
-	if r := strField(m, "result"); r != "" {
-		if len(r) > 80 {
-			return r[:77] + "..."
-		}
-		return r
-	}
-	// Try args for file paths.
-	if args, ok := m["args"]; ok {
-		if argsMap, ok := args.(map[string]any); ok {
-			if path, ok := argsMap["path"].(string); ok {
-				return path
-			}
-			if path, ok := argsMap["file_path"].(string); ok {
-				return path
-			}
-		}
-	}
-	return ""
 }

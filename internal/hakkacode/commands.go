@@ -174,8 +174,9 @@ func HelpText() string {
   /compact [n]              Show or set context soft limit
 
 Keys:
-  Ctrl+P / Ctrl+N           Previous/next prompt from history
-  PgUp / PgDown             Scroll the transcript by a page
-  Up / Down / mouse wheel   Scroll the transcript by a line
+  Up / Down (empty input)    Browse prompt history
+  PgUp / PgDown              Scroll the transcript by a page
+  Mouse wheel                Scroll the transcript
+  Mouse drag                 Select text to clipboard
 `
 }

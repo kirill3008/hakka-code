@@ -271,13 +271,27 @@ func renderData(cmd string, data map[string]any) string {
 }
 
 func compactJSON(raw json.RawMessage) string {
+	return compactJSONStr(string(raw))
+}
+
+func compactJSONStr(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return string(raw)
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		if len(s) > 160 {
+			return s[:157] + "..."
+		}
+		return s
 	}
 	b, err := json.Marshal(v)
 	if err != nil {
-		return string(raw)
+		if len(s) > 160 {
+			return s[:157] + "..."
+		}
+		return s
 	}
 	if len(b) > 160 {
 		return string(b[:157]) + "..."

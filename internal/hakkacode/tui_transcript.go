@@ -67,7 +67,11 @@ func (m *model) appendToolCall(name string, id string, status transcript.ToolSta
 			entry.Raw = fmt.Sprintf("✓ %s", name)
 		}
 	} else {
-		entry.Raw = fmt.Sprintf("✗ %s: %s", name, errText)
+		if snippet != "" {
+			entry.Raw = fmt.Sprintf("✗ %s · %s: %s", name, snippet, errText)
+		} else {
+			entry.Raw = fmt.Sprintf("✗ %s: %s", name, errText)
+		}
 	}
 	m.appendEntry(entry)
 }
