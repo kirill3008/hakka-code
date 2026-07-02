@@ -6,18 +6,21 @@ This repository is intentionally separate from the upstream Hakka backend for no
 
 ## Status
 
-Early MVP.
+Early MVP, protocol v2.
 
 Current features:
 
-- Connects to Hakka WebSocket gateway
-- Creates a fresh session on startup
+- Connects to Hakka's v2 WebSocket protocol
+- Resumes the most recently updated non-empty session on startup, or creates a fresh one
 - Sets session cwd to the current directory
-- Enables all tools with `#all`
-- Simple REPL chat loop
-- Streams assistant output
+- Enables tools on startup (`#all` by default, configurable)
+- Simple REPL chat loop with markdown-rendered assistant replies (via glamour)
+- Diff-style rendering for `edit_file`/`write_file` tool calls
+- Auto-renames a session (via LLM) after its first exchange
+- Per-turn statusline: model, token/context usage, cost
 - Renders basic tool lifecycle events
 - Client-side slash command parsing
+- Optional config file at `~/.hakka-code.json` (`addr`, `enable_tags`)
 
 ## Requirements
 
@@ -75,13 +78,22 @@ Inside the REPL:
 /compact [n]             Show or set compaction limit
 ```
 
+## Configuration
+
+Optional `~/.hakka-code.json` (CLI flags always override):
+
+```json
+{
+  "addr": "ws://127.0.0.1:8765/ws",
+  "enable_tags": "#all"
+}
+```
+
 ## Next steps
 
 Likely next iterations:
 
-1. Better command-result rendering instead of raw JSON.
-2. Session switch should reload/display history nicely.
-3. Ctrl+C/Esc cancellation while a turn is streaming.
-4. Replace the REPL with a Bubble Tea TUI.
-5. Add markdown/code-block rendering.
-6. Add collapsible tool output.
+1. Ctrl+C/Esc cancellation while a turn is streaming (needs concurrent stdin + socket reads).
+2. Replace the REPL with a Bubble Tea TUI for true incremental rendering (today, assistant text is rendered as markdown only once the turn completes).
+3. Session switch should reload/display history nicely.
+4. Add collapsible tool output.

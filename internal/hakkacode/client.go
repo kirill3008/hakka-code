@@ -2,8 +2,11 @@ package hakkacode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,8 +112,17 @@ func (c *Client) ExecuteCommand(ctx context.Context, sessionID string, cmd strin
 		case "error":
 			return frame, nil
 		case "session":
-			if (cmd == "session_create" || cmd == "get_session") && frame.Event == cmd {
+			if cmd == "session_create" && frame.Event == cmd {
 				return frame, nil
+			}
+			if cmd == "get_session" && frame.Event == cmd {
+				reqID, _ := params["id"].(string)
+				if sessionIDMatches(reqID, frame.Session) {
+					return frame, nil
+				}
+				// Otherwise this is an unrelated "session" frame fanned out
+				// by the server's own welcome auto-subscribe — keep waiting
+				// for the response to our specific request.
 			}
 		case "result":
 			if frame.Cmd == cmd {
@@ -124,13 +136,90 @@ func (c *Client) ExecuteCommand(ctx context.Context, sessionID string, cmd strin
 	}
 }
 
+// sessionIDMatches reports whether a returned session map plausibly
+// corresponds to the requested id/prefix. An empty requested id always
+// matches (caller has no specific target).
+func sessionIDMatches(requested string, got map[string]any) bool {
+	if requested == "" {
+		return true
+	}
+	if got == nil {
+		return false
+	}
+	id, _ := got["id"].(string)
+	short, _ := got["short_id"].(string)
+	return requested == id || requested == short ||
+		strings.HasPrefix(id, requested) || strings.HasPrefix(requested, id)
+}
+
+// ListSessions returns the session metadata maps for the current
+// namespace, as reported by "session_list".
+func (c *Client) ListSessions(ctx context.Context) ([]map[string]any, error) {
+	frame, err := c.ExecuteCommand(ctx, "", "session_list", nil)
+	if err != nil {
+		return nil, err
+	}
+	if frame.Error != "" {
+		return nil, errors.New(frame.Error)
+	}
+	raw, _ := frame.Data["sessions"].([]any)
+	sessions := make([]map[string]any, 0, len(raw))
+	for _, v := range raw {
+		if m, ok := v.(map[string]any); ok {
+			sessions = append(sessions, m)
+		}
+	}
+	return sessions, nil
+}
+
+// MostRecentSession returns the most recently updated non-empty session,
+// or nil if there is none.
+func (c *Client) MostRecentSession(ctx context.Context) (map[string]any, error) {
+	sessions, err := c.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	sort.Slice(sessions, func(i, j int) bool {
+		ui, _ := sessions[i]["updated_at"].(string)
+		uj, _ := sessions[j]["updated_at"].(string)
+		return ui > uj
+	})
+	return sessions[0], nil
+}
+
+// GetSession fetches a session by id or unique prefix.
+func (c *Client) GetSession(ctx context.Context, id string) (*SessionSummary, string, error) {
+	frame, err := c.ExecuteCommand(ctx, "", "get_session", map[string]any{"id": id})
+	if err != nil {
+		return nil, "", err
+	}
+	if frame.Error != "" {
+		return nil, "", errors.New(frame.Error)
+	}
+	sessionID := frame.SessionID
+	var summary *SessionSummary
+	if frame.Session != nil {
+		summary = sessionSummaryFromMap(frame.Session)
+		if summary.ID != "" {
+			sessionID = summary.ID
+		}
+	}
+	if sessionID == "" {
+		return nil, "", fmt.Errorf("get_session returned no session id")
+	}
+	return summary, sessionID, nil
+}
+
 func (c *Client) CreateSession(ctx context.Context) (*SessionSummary, string, error) {
 	frame, err := c.ExecuteCommand(ctx, "", "session_create", nil)
 	if err != nil {
 		return nil, "", err
 	}
 	if frame.Error != "" {
-		return nil, "", fmt.Errorf(frame.Error)
+		return nil, "", errors.New(frame.Error)
 	}
 
 	sessionID := frame.SessionID
