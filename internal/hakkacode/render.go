@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"hakka-code/internal/hakkacode/protocol"
 )
 
 // This file holds pure, string-returning render helpers shared by the
@@ -13,20 +15,19 @@ import (
 
 // renderStatusline formats a dim one-line summary after each turn:
 // model, context/token usage, and running cost.
-func renderStatusline(stats *TurnStats) string {
+func renderStatusline(stats *protocol.TurnStats) string {
 	if stats == nil {
 		return ""
 	}
-	line := fmt.Sprintf("%s · %d tokens (ctx ~%dk) · $%.4f · %d msgs",
+	return dimf("%s · %d tokens (ctx ~%dk) · $%.4f · %d msgs\n",
 		stats.Model, stats.TotalTokens, (stats.EstimatedContextTokens+999)/1000, stats.TotalCost, stats.MessageCount)
-	return fmt.Sprintf("\033[2m%s\033[0m\n", line)
 }
 
 // toolsLabel summarizes the currently in-flight tool calls for the
 // spinner label. Multiple calls can be running concurrently (the engine
 // fans out tool execution), so this collapses to a count once there's
 // more than one.
-func toolsLabel(running map[string]ResponseFrame) string {
+func toolsLabel(running map[string]protocol.ResponseFrame) string {
 	switch len(running) {
 	case 0:
 		return "Thinking"
@@ -49,7 +50,7 @@ func toolsLabel(running map[string]ResponseFrame) string {
 //
 // ok is false when cmd doesn't carry session-name information at all
 // (the caller should leave its existing state untouched).
-func trackedSessionName(cmd string, frame ResponseFrame) (name string, ok bool) {
+func trackedSessionName(cmd string, frame protocol.ResponseFrame) (name string, ok bool) {
 	var session map[string]any
 	switch cmd {
 	case "session_create", "get_session":
@@ -82,11 +83,11 @@ var resultHeaders = map[string]string{
 // renderCommandResult renders the response to a slash-command-triggered
 // "cmd" request as a plain string. Interactive regions (for clickable
 // lists) are discarded; use appendCommandResult instead if you need them.
-func renderCommandResult(cmd string, frame ResponseFrame) string {
+func renderCommandResult(cmd string, frame protocol.ResponseFrame) string {
 	return renderCommandResultInteractive(cmd, frame).text
 }
 
-func renderSessionFrame(frame ResponseFrame) string {
+func renderSessionFrame(frame protocol.ResponseFrame) string {
 	var b strings.Builder
 	if frame.Session != nil {
 		b.WriteString(formatSessionDetail(frame.Session))
@@ -103,7 +104,7 @@ func renderSessionFrame(frame ResponseFrame) string {
 // toolStarts).  For "ok" it returns a one-line confirmation.  For "err"
 // it returns the full picture (header, diff/preview if startFrame is
 // provided, error detail).
-func renderToolEvent(startFrame *ResponseFrame, frame ResponseFrame) string {
+func renderToolEvent(startFrame *protocol.ResponseFrame, frame protocol.ResponseFrame) string {
 	name := toolNameFromFrame(frame)
 	if name == "" {
 		name = "tool"
@@ -143,7 +144,7 @@ func renderToolEvent(startFrame *ResponseFrame, frame ResponseFrame) string {
 
 // toolNameFromFrame extracts the tool name from a response frame,
 // trying the known fields.
-func toolNameFromFrame(frame ResponseFrame) string {
+func toolNameFromFrame(frame protocol.ResponseFrame) string {
 	if frame.Tool != "" {
 		return frame.Tool
 	}
@@ -155,7 +156,7 @@ func toolNameFromFrame(frame ResponseFrame) string {
 
 // toolSnippet prefers the server-provided human-readable snippet, falling
 // back to a compacted JSON dump of the args.
-func toolSnippet(frame ResponseFrame) string {
+func toolSnippet(frame protocol.ResponseFrame) string {
 	if frame.Snippet != "" {
 		return frame.Snippet
 	}
@@ -185,8 +186,8 @@ func renderEditFileDiff(args json.RawMessage) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(diffLines("-", p.Old, "\033[31m"))
-	b.WriteString(diffLines("+", p.New, "\033[32m"))
+	b.WriteString(diffLines("-", p.Old, sgrRed))
+	b.WriteString(diffLines("+", p.New, sgrGreen))
 	return b.String()
 }
 
@@ -202,7 +203,7 @@ func renderWriteFilePreview(args json.RawMessage) string {
 	if err := json.Unmarshal(args, &p); err != nil {
 		return ""
 	}
-	return diffLines(" ", p.Content, "\033[2m")
+	return diffLines(" ", p.Content, sgrDim)
 }
 
 func diffLines(prefix, text, color string) string {
@@ -221,10 +222,10 @@ func diffLines(prefix, text, color string) string {
 	}
 	var b strings.Builder
 	for _, l := range shown {
-		fmt.Fprintf(&b, "  %s%s %s\033[0m\n", color, prefix, l)
+		fmt.Fprintf(&b, "  %s%s %s%s\n", color, prefix, l, sgrReset)
 	}
 	if extra > 0 {
-		fmt.Fprintf(&b, "  \033[2m... (%d more lines)\033[0m\n", extra)
+		fmt.Fprintf(&b, "  %s... (%d more lines)%s\n", sgrDim, extra, sgrReset)
 	}
 	return b.String()
 }

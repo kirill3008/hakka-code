@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"hakka-code/internal/hakkacode/backend"
+	"hakka-code/internal/hakkacode/protocol"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -41,7 +42,7 @@ func bootCmd(ctx context.Context, client backend.Backend, cfg Config) tea.Cmd {
 	}
 }
 
-func resumeOrCreateSession(ctx context.Context, client backend.Backend) (*SessionSummary, string, []map[string]any, bool, error) {
+func resumeOrCreateSession(ctx context.Context, client backend.Backend) (*protocol.SessionSummary, string, []map[string]any, bool, error) {
 	recent, err := client.MostRecentSession(ctx)
 	if err != nil {
 		return nil, "", nil, false, err

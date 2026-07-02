@@ -19,14 +19,14 @@ var (
 // italic — otherwise "**bold**" would get its outer "*" pairs partially
 // consumed by the italic pass first.
 func renderInline(s string) string {
-	s = inlineCodeRE.ReplaceAllString(s, "\033[36m$1\033[0m")
+	s = inlineCodeRE.ReplaceAllString(s, sgrCyan+"$1"+sgrReset)
 	s = inlineBoldRE.ReplaceAllStringFunc(s, func(match string) string {
 		sub := inlineBoldRE.FindStringSubmatch(match)
 		text := sub[1]
 		if text == "" {
 			text = sub[2]
 		}
-		return "\033[1m" + text + "\033[0m"
+		return sgrBold + text + sgrReset
 	})
 	s = inlineItalicRE.ReplaceAllStringFunc(s, func(match string) string {
 		sub := inlineItalicRE.FindStringSubmatch(match)
@@ -34,7 +34,7 @@ func renderInline(s string) string {
 		if text == "" {
 			text = sub[2]
 		}
-		return "\033[3m" + text + "\033[0m"
+		return sgrItalic + text + sgrReset
 	})
 	return s
 }

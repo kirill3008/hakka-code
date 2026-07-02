@@ -3,10 +3,12 @@ package hakkacode
 import (
 	"strings"
 	"testing"
+
+	"hakka-code/internal/hakkacode/protocol"
 )
 
 func TestRenderToolEventStartIsSilent(t *testing.T) {
-	frame := ResponseFrame{
+	frame := protocol.ResponseFrame{
 		Type:   "tool",
 		Tool:   "edit_file",
 		ID:     "call_1",
@@ -20,7 +22,7 @@ func TestRenderToolEventStartIsSilent(t *testing.T) {
 }
 
 func TestRenderToolEventOkCollapsesToOneLine(t *testing.T) {
-	frame := ResponseFrame{
+	frame := protocol.ResponseFrame{
 		Type:       "tool",
 		Tool:       "write_file",
 		ID:         "call_1",
@@ -39,13 +41,13 @@ func TestRenderToolEventOkCollapsesToOneLine(t *testing.T) {
 }
 
 func TestRenderToolEventErrShowsFullDetail(t *testing.T) {
-	startFrame := &ResponseFrame{
+	startFrame := &protocol.ResponseFrame{
 		Tool:   "edit_file",
 		ID:     "call_1",
 		Status: "start",
 		Args:   []byte(`{"path":"foo.go","old":"bar","new":"baz"}`),
 	}
-	frame := ResponseFrame{
+	frame := protocol.ResponseFrame{
 		Type:   "tool",
 		Tool:   "edit_file",
 		ID:     "call_1",
@@ -65,7 +67,7 @@ func TestRenderToolEventErrShowsFullDetail(t *testing.T) {
 }
 
 func TestRenderToolEventErrWithoutStartFrame(t *testing.T) {
-	frame := ResponseFrame{
+	frame := protocol.ResponseFrame{
 		Type:   "tool",
 		Tool:   "some_tool",
 		ID:     "call_1",

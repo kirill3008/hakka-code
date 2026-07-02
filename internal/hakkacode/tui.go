@@ -67,7 +67,7 @@ func Run(ctx context.Context, cfg Config) error {
 // --- messages ---
 
 type bootMsg struct {
-	summary   *SessionSummary
+	summary   *protocol.SessionSummary
 	sessionID string
 	messages  []map[string]any
 	resumed   bool
@@ -77,12 +77,12 @@ type bootMsg struct {
 	err       error
 }
 
-type frameMsg ResponseFrame
+type frameMsg protocol.ResponseFrame
 type readErrMsg struct{ err error }
 type spinTickMsg struct{}
 type cmdResultMsg struct {
 	cmd   string
-	frame ResponseFrame
+	frame protocol.ResponseFrame
 	err   error
 }
 type autoRenameMsg struct {
@@ -109,7 +109,7 @@ type model struct {
 	height   int
 
 	turnActive bool
-	toolStarts map[string]ResponseFrame
+	toolStarts map[string]protocol.ResponseFrame
 	sawTool    bool
 	spinIdx    int
 	spinLabel  string
@@ -148,7 +148,7 @@ func newModel(ctx context.Context, cfg Config, client backend.Backend) model {
 		cfg:               cfg,
 		client:            client,
 		input:             ta,
-		toolStarts:        map[string]ResponseFrame{},
+		toolStarts:        map[string]protocol.ResponseFrame{},
 		transcriptEntries: transcript.New(),
 		selection:         transcript.NewSelection(),
 	}
@@ -179,7 +179,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleBoot(msg), textarea.Blink
 
 	case frameMsg:
-		return m.handleFrame(ResponseFrame(msg))
+		return m.handleFrame(protocol.ResponseFrame(msg))
 
 	case readErrMsg:
 		m.fatalErr = msg.err
@@ -191,7 +191,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case autoRenameMsg:
 		if msg.name != "" {
 			m.sessionName = msg.name
-			m.appendLine(fmt.Sprintf("\033[2msession renamed · %s\033[0m", msg.name))
+			m.appendLine(dimf("session renamed · %s", msg.name))
 		}
 		return m, nil
 
@@ -388,7 +388,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	}
 	m.appendUserPrompt(line)
 	m.turnActive = true
-	m.toolStarts = map[string]ResponseFrame{}
+	m.toolStarts = map[string]protocol.ResponseFrame{}
 	m.sawTool = false
 	m.spinIdx = 0
 	m.spinLabel = "Thinking"
@@ -508,7 +508,7 @@ func (m model) handleCmdResult(msg cmdResultMsg) model {
 	return m
 }
 
-func (m model) handleFrame(frame ResponseFrame) (tea.Model, tea.Cmd) {
+func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 	if frame.SessionID != "" {
 		m.sessionID = frame.SessionID
 	}
@@ -529,7 +529,7 @@ func (m model) handleFrame(frame ResponseFrame) (tea.Model, tea.Cmd) {
 			}
 			m.spinLabel = toolsLabel(m.toolStarts)
 		} else {
-			var startFrame *ResponseFrame
+			var startFrame *protocol.ResponseFrame
 			if s, ok := m.toolStarts[frame.ID]; ok {
 				startFrame = &s
 			}
@@ -588,9 +588,9 @@ func (m model) View() string {
 	if m.turnActive {
 		frame := spinnerFrames[m.spinIdx%len(spinnerFrames)]
 		elapsed := time.Since(m.spinStart)
-		status = fmt.Sprintf("\033[2m%s %s (%s)\033[0m", frame, m.spinLabel, formatDuration(elapsed))
+		status = dimf("%s %s (%s)", frame, m.spinLabel, formatDuration(elapsed))
 	} else {
-		status = "\033[2mready\033[0m"
+		status = dim("ready")
 	}
 
 	inputBox := lipgloss.NewStyle().

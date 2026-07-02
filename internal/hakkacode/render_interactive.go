@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"hakka-code/internal/hakkacode/protocol"
 	"hakka-code/internal/hakkacode/transcript"
 )
 
@@ -44,7 +45,7 @@ func renderDataInteractive(cmd string, data map[string]any) (string, []transcrip
 
 // renderCommandResultInteractive renders the response to a slash command
 // with clickable regions for interactive list results.
-func renderCommandResultInteractive(cmd string, frame ResponseFrame) renderedResult {
+func renderCommandResultInteractive(cmd string, frame protocol.ResponseFrame) renderedResult {
 	if frame.Error != "" {
 		return renderedResult{text: fmt.Sprintf("error: %s\n", frame.Error)}
 	}
@@ -68,7 +69,7 @@ func renderCommandResultInteractive(cmd string, frame ResponseFrame) renderedRes
 
 	if header, ok := resultHeaders[cmd]; ok {
 		return renderedResult{
-			text:    fmt.Sprintf("\033[1m%s\033[0m\n%s", header, body),
+			text:    boldf("%s\n%s", header, body),
 			regions: shiftRegions(regions, 1),
 		}
 	}
