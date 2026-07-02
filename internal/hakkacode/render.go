@@ -80,32 +80,10 @@ var resultHeaders = map[string]string{
 }
 
 // renderCommandResult renders the response to a slash-command-triggered
-// "cmd" request.
+// "cmd" request as a plain string. Interactive regions (for clickable
+// lists) are discarded; use appendCommandResult instead if you need them.
 func renderCommandResult(cmd string, frame ResponseFrame) string {
-	if frame.Error != "" {
-		return fmt.Sprintf("error: %s\n", frame.Error)
-	}
-
-	var body string
-	switch frame.Type {
-	case "session":
-		body = renderSessionFrame(frame)
-	case "result":
-		body = renderData(cmd, frame.Data)
-	case "done":
-		if frame.Text != "" {
-			body = frame.Text + "\n"
-		} else {
-			body = fmt.Sprintf("%s: ok\n", cmd)
-		}
-	default:
-		body = fmt.Sprintf("%s: ok\n", cmd)
-	}
-
-	if header, ok := resultHeaders[cmd]; ok {
-		return fmt.Sprintf("\033[1m%s\033[0m\n%s", header, body)
-	}
-	return body
+	return renderCommandResultInteractive(cmd, frame).text
 }
 
 func renderSessionFrame(frame ResponseFrame) string {
@@ -128,7 +106,7 @@ func renderSessionFrame(frame ResponseFrame) string {
 // call ID) buffers "start" frames so that context is available once the
 // matching "err" frame arrives.
 func renderToolEvent(toolStarts map[string]ResponseFrame, frame ResponseFrame) string {
-	name := frame.Tool
+	name := toolNameFromFrame(frame)
 	if name == "" {
 		name = "tool"
 	}
@@ -158,7 +136,7 @@ func renderToolEvent(toolStarts map[string]ResponseFrame, frame ResponseFrame) s
 			fmt.Fprintf(&b, "\n⏺ %s\n", name)
 		}
 		if hadStart {
-			switch frame.Tool {
+			switch name {
 			case "edit_file":
 				b.WriteString(renderEditFileDiff(start.Args))
 			case "write_file":
@@ -171,6 +149,18 @@ func renderToolEvent(toolStarts map[string]ResponseFrame, frame ResponseFrame) s
 		}
 	}
 	return b.String()
+}
+
+// toolNameFromFrame extracts the tool name from a response frame,
+// trying the known fields.
+func toolNameFromFrame(frame ResponseFrame) string {
+	if frame.Tool != "" {
+		return frame.Tool
+	}
+	if frame.Command != "" {
+		return frame.Command
+	}
+	return ""
 }
 
 // toolSnippet prefers the server-provided human-readable snippet, falling

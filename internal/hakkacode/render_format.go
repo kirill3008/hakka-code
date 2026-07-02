@@ -181,16 +181,71 @@ func formatMessageHistory(messages []map[string]any) string {
 	for _, m := range messages {
 		role := strField(m, "role")
 		content := strField(m, "content")
-		if content == "" {
-			continue
-		}
 		switch role {
 		case "user":
 			b.WriteString(renderUserPrompt("❯ " + content))
 		case "assistant":
 			b.WriteString(renderMarkdown(content))
 			b.WriteString("\n")
+		case "tool":
+			toolName := strField(m, "tool")
+			if toolName == "" {
+				toolName = strField(m, "tool_name")
+			}
+			if toolName == "" {
+				toolName = strField(m, "name")
+			}
+			if toolName == "" {
+				toolName = "tool"
+			}
+			toolStatus := strField(m, "status")
+			snippet := toolHistorySnippet(m)
+			if toolStatus == "err" || toolStatus == "error" {
+				errText := strField(m, "error")
+				if errText == "" {
+					errText = strField(m, "content")
+				}
+				if errText == "" {
+					errText = "unknown error"
+				}
+				if snippet != "" {
+					fmt.Fprintf(&b, "✗ %s · %s: %s\n", toolName, snippet, errText)
+				} else {
+					fmt.Fprintf(&b, "✗ %s: %s\n", toolName, errText)
+				}
+			} else if snippet != "" {
+				fmt.Fprintf(&b, "✓ %s · %s\n", toolName, snippet)
+			} else {
+				fmt.Fprintf(&b, "✓ %s\n", toolName)
+			}
 		}
 	}
 	return b.String()
+}
+
+// toolHistorySnippet tries to extract a human-readable summary from a
+// tool message in the history.
+func toolHistorySnippet(m map[string]any) string {
+	if s := strField(m, "snippet"); s != "" {
+		return s
+	}
+	// Try to extract from result field.
+	if r := strField(m, "result"); r != "" {
+		if len(r) > 80 {
+			return r[:77] + "..."
+		}
+		return r
+	}
+	// Try args for file paths.
+	if args, ok := m["args"]; ok {
+		if argsMap, ok := args.(map[string]any); ok {
+			if path, ok := argsMap["path"].(string); ok {
+				return path
+			}
+			if path, ok := argsMap["file_path"].(string); ok {
+				return path
+			}
+		}
+	}
+	return ""
 }
