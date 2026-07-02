@@ -2,12 +2,13 @@ package hakkacode
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/atotto/clipboard"
 
 	"hakka-code/internal/hakkacode/backend"
 	"hakka-code/internal/hakkacode/protocol"
@@ -574,7 +575,8 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleCopyToClipboard(msg copyToClipboardMsg) (tea.Model, tea.Cmd) {
-	return m, tea.Printf("\x1b]52;c;%s\x07", base64.StdEncoding.EncodeToString([]byte(msg.text)))
+	_ = clipboard.WriteAll(msg.text)
+	return m, nil
 }
 
 // --- View ---
@@ -582,6 +584,29 @@ func (m model) handleCopyToClipboard(msg copyToClipboardMsg) (tea.Model, tea.Cmd
 func (m model) View() string {
 	if !m.ready {
 		return "connecting…\n"
+	}
+
+	var vpContent string
+	if m.selection.IsActive() {
+		full := m.transcriptEntries.String()
+		highlighted := m.selection.ApplyHighlight(full)
+		lines := strings.Split(strings.TrimRight(highlighted, "\n"), "\n")
+		start := m.viewport.YOffset
+		end := start + m.viewport.Height
+		if end > len(lines) {
+			end = len(lines)
+		}
+		if start >= end {
+			start = 0
+			if end > 0 {
+				end = len(lines)
+			}
+		}
+		if end > start {
+			vpContent = strings.Join(lines[start:end], "\n")
+		}
+	} else {
+		vpContent = m.viewport.View()
 	}
 
 	var status string
@@ -598,7 +623,7 @@ func (m model) View() string {
 		BorderForeground(lipgloss.Color(inputBorderColor)).
 		Render(m.input.View())
 
-	return m.viewport.View() + "\n\n" + status + "\n" + inputBox
+	return vpContent + "\n\n" + status + "\n" + inputBox
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}

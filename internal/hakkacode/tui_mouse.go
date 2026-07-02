@@ -22,14 +22,14 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.selection.Clear()
 		return m, nil
 
-	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
-		return m.handleMousePress(msg)
+	case msg.Action == tea.MouseActionRelease:
+		return m.handleMouseRelease(msg)
 
-	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionMotion:
+	case msg.Action == tea.MouseActionMotion:
 		return m.handleMouseDrag(msg)
 
-	case msg.Button == tea.MouseButtonNone && msg.Action == tea.MouseActionRelease:
-		return m.handleMouseRelease(msg)
+	case msg.Action == tea.MouseActionPress:
+		return m.handleMousePress(msg)
 	}
 	return m, nil
 }
@@ -65,6 +65,7 @@ func (m model) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	vpLine := m.viewport.YOffset + msg.Y
+	m.selection.Extend(vpLine, msg.X)
 
 	entry, _ := m.transcriptEntries.EntryAtLine(vpLine)
 	sl, sc, el, ec := m.selection.Normalized()
