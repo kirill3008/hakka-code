@@ -229,9 +229,7 @@ func (m model) handleResize(msg tea.WindowSizeMsg) model {
 }
 
 func (m *model) recomputeViewportHeight() {
-	const statusArea = 2
-	inputBoxHeight := m.input.Height() + 2
-	vpHeight := m.height - statusArea - inputBoxHeight
+	vpHeight := m.height - m.input.Height() - 4
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
@@ -247,7 +245,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlC:
 		if m.turnActive {
 			m.spinLabel = "Cancelling"
-			return m, cancelTurnCmd(m.client, m.sessionID)
+			return m, cancelTurnCmd(m.ctx, m.client, m.sessionID)
 		}
 		return m, tea.Quit
 
@@ -418,7 +416,7 @@ func (m model) handleSlash(sc *SlashCommand) (tea.Model, tea.Cmd) {
 		if m.turnActive {
 			m.spinLabel = "Cancelling"
 		}
-		return m, cancelTurnCmd(m.client, m.sessionID)
+		return m, cancelTurnCmd(m.ctx, m.client, m.sessionID)
 	case "clear":
 		m.transcriptEntries = transcript.New()
 		m.viewport.SetContent("")
@@ -605,27 +603,9 @@ func (m model) View() string {
 		return "connecting…\n"
 	}
 
-	var vpContent string
+	vpContent := m.viewport.View()
 	if m.selection.IsActive() {
-		full := m.transcriptEntries.String()
-		highlighted := m.selection.ApplyHighlight(full)
-		lines := strings.Split(strings.TrimRight(highlighted, "\n"), "\n")
-		start := m.viewport.YOffset
-		end := start + m.viewport.Height
-		if end > len(lines) {
-			end = len(lines)
-		}
-		if start >= end {
-			start = 0
-			if end > 0 {
-				end = len(lines)
-			}
-		}
-		if end > start {
-			vpContent = strings.Join(lines[start:end], "\n")
-		}
-	} else {
-		vpContent = m.viewport.View()
+		vpContent = applySelectionToViewport(vpContent, m.selection, m.viewport.YOffset)
 	}
 
 	var status string
@@ -643,6 +623,131 @@ func (m model) View() string {
 		Render(m.input.View())
 
 	return vpContent + "\n\n" + status + "\n" + inputBox
+}
+
+// applySelectionToViewport applies the selection highlight to the
+// viewport's visible portion. It maps the selection's absolute
+// transcript coordinates into the viewport's visible window, then
+// applies reverse-video highlighting only to lines that fall within
+// the visible range. This avoids the layout mismatch that occurred
+// when View() had two separate rendering paths.
+func applySelectionToViewport(vpContent string, sel *transcript.Selection, yOffset int) string {
+	// Split into lines, preserving the trailing newline from viewport.
+	rawLines := strings.Split(vpContent, "\n")
+	// viewport.View() always appends a trailing newline which
+	// Split turns into an empty "" at the end. Preserve it.
+	hasTrailingNewline := vpContent != "" && vpContent[len(vpContent)-1] == '\n'
+
+	sl, sc, el, ec := sel.Normalized()
+
+	// Map absolute coordinates into visible-window-relative.
+	relStart := sl - yOffset
+	relEnd := el - yOffset
+
+	var result []string
+	for i, line := range rawLines {
+		// The trailing empty element from Split("\n") passes through untouched.
+		if i == len(rawLines)-1 && hasTrailingNewline && line == "" {
+			result = append(result, "")
+			continue
+		}
+
+		if i < relStart || i > relEnd {
+			result = append(result, line)
+		} else if relStart == relEnd {
+			// Single-line selection within one visible row.
+			result = append(result, highlightRegionDetached(line, sc, ec))
+		} else if i == relStart {
+			// First line: highlight from startCol to end of line.
+			result = append(result, highlightRegionDetached(line, sc, -1))
+		} else if i == relEnd {
+			// Last line: highlight from start of line to endCol.
+			result = append(result, highlightRegionDetached(line, 0, ec))
+		} else {
+			// Middle selected line: entire line highlighted.
+			result = append(result, wrapFullLineDetached(line))
+		}
+	}
+
+	return strings.Join(result, "\n")
+}
+
+// highlightRegionDetached is a standalone version of highlightRegion
+// that works on a single line without needing the full clean/raw pair.
+// start and end are display-column (rune) indices; end=-1 means to end.
+func highlightRegionDetached(raw string, start, end int) string {
+	clean := transcript.StripANSI(raw)
+	if start < 0 {
+		start = 0
+	}
+	cleanRunes := utf8.RuneCountInString(clean)
+	if end < 0 || end > cleanRunes {
+		end = cleanRunes
+	}
+	if start >= cleanRunes || start >= end {
+		return raw
+	}
+
+	rawStart := transcript.CleanColToRaw(clean, raw, start)
+	rawEnd := transcript.CleanColToRaw(clean, raw, end)
+
+	var sb strings.Builder
+	sb.WriteString(raw[:rawStart])
+	sb.WriteString("\x1b[7m")
+	middle := raw[rawStart:rawEnd]
+	for i := 0; i < len(middle); {
+		if middle[i] == '\x1b' {
+			seqStart := i
+			for i < len(middle) && middle[i] != 'm' {
+				i++
+			}
+			if i < len(middle) {
+				i++
+			}
+			seq := middle[seqStart:i]
+			sb.WriteString(seq)
+			if seq == "\x1b[0m" || seq == "\x1b[27m" {
+				sb.WriteString("\x1b[7m")
+			}
+		} else {
+			sb.WriteByte(middle[i])
+			i++
+		}
+	}
+	sb.WriteString("\x1b[27m")
+	sb.WriteString(raw[rawEnd:])
+	return sb.String()
+}
+
+// wrapFullLineDetached wraps an entire line in reverse video,
+// re-applying reverse after any embedded ANSI reset.
+func wrapFullLineDetached(raw string) string {
+	if raw == "" {
+		return "\x1b[7m\x1b[27m"
+	}
+	var sb strings.Builder
+	sb.WriteString("\x1b[7m")
+	for i := 0; i < len(raw); {
+		if raw[i] == '\x1b' {
+			start := i
+			for i < len(raw) && raw[i] != 'm' {
+				i++
+			}
+			if i < len(raw) {
+				i++
+			}
+			seq := raw[start:i]
+			sb.WriteString(seq)
+			if seq == "\x1b[0m" || seq == "\x1b[27m" {
+				sb.WriteString("\x1b[7m")
+			}
+		} else {
+			sb.WriteByte(raw[i])
+			i++
+		}
+	}
+	sb.WriteString("\x1b[27m")
+	return sb.String()
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}

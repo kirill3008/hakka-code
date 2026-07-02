@@ -88,9 +88,22 @@ func autoRenameCmd(ctx context.Context, client backend.Backend, sessionID string
 	}
 }
 
-func cancelTurnCmd(client backend.Backend, sessionID string) tea.Cmd {
+func cancelTurnCmd(ctx context.Context, client backend.Backend, sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		_ = client.Cancel(sessionID)
-		return nil
+		// Drain all frames until the server confirms cancellation with a
+		// "done" frame. Without this, stale frames (deltas, tool results,
+		// and especially the done frame itself) from the cancelled turn
+		// remain in the read channel and poison the next turn's frame
+		// stream, causing it to end immediately.
+		for {
+			frame, err := client.Read(ctx)
+			if err != nil {
+				return readErrMsg{err}
+			}
+			if frame.Type == protocol.TypeDone {
+				return frameMsg(frame)
+			}
+		}
 	}
 }

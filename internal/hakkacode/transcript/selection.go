@@ -3,13 +3,19 @@ package transcript
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
+// StripANSI removes ANSI escape sequences from a string.
+func StripANSI(s string) string {
+	return ansiRE.ReplaceAllString(s, "")
+}
+
 // stripANSI removes ANSI escape sequences from a string.
 func stripANSI(s string) string {
-	return ansiRE.ReplaceAllString(s, "")
+	return StripANSI(s)
 }
 
 // SelectionState is the phase of a text selection drag.
@@ -109,7 +115,8 @@ func (s *Selection) Contains(line, col int) bool {
 }
 
 // Text extracts the selected text from viewport content (which may
-// contain ANSI escapes). Returns clean text suitable for clipboard.
+// contain ANSI escapes and multi-byte UTF-8). Returns clean text
+// suitable for clipboard.
 func (s *Selection) Text(content string) string {
 	if !s.IsActive() || content == "" {
 		return ""
@@ -130,34 +137,52 @@ func (s *Selection) Text(content string) string {
 	}
 
 	if sl == el {
-		line := cleanLines[sl]
-		if sc >= len(line) {
-			return ""
-		}
-		end := ec
-		if end > len(line) {
-			end = len(line)
-		}
-		return line[sc:end]
+		return sliceByColumns(cleanLines[sl], sc, ec)
 	}
 
 	var parts []string
-	firstLine := cleanLines[sl]
-	if sc < len(firstLine) {
-		parts = append(parts, firstLine[sc:])
-	} else {
-		parts = append(parts, "")
-	}
+	first := sliceByColumns(cleanLines[sl], sc, -1)
+	parts = append(parts, first)
 	for i := sl + 1; i < el; i++ {
 		parts = append(parts, cleanLines[i])
 	}
-	lastLine := cleanLines[el]
-	if ec > len(lastLine) {
-		ec = len(lastLine)
-	}
-	parts = append(parts, lastLine[:ec])
+	last := sliceByColumns(cleanLines[el], 0, ec)
+	parts = append(parts, last)
 
 	return strings.Join(parts, "\n")
+}
+
+// sliceByColumns returns a substring of s from display-column startCol
+// to endCol. If endCol is negative, returns from startCol to end of s.
+// Columns count runes, not bytes.
+func sliceByColumns(s string, startCol, endCol int) string {
+	bi := colToByteOffset(s, startCol)
+	if endCol < 0 {
+		return s[bi:]
+	}
+	ei := colToByteOffset(s, endCol)
+	if ei > len(s) {
+		ei = len(s)
+	}
+	if bi >= ei {
+		return ""
+	}
+	return s[bi:ei]
+}
+
+// colToByteOffset converts a display-column (rune) index into the byte
+// offset within s. Returns len(s) when col is beyond the string.
+func colToByteOffset(s string, col int) int {
+	ri := 0 // current rune index
+	for bi := 0; bi < len(s); {
+		if ri == col {
+			return bi
+		}
+		_, size := utf8.DecodeRuneInString(s[bi:])
+		bi += size
+		ri++
+	}
+	return len(s)
 }
 
 // ApplyHighlight overlays the selection highlight onto content.
@@ -188,11 +213,12 @@ func (s *Selection) ApplyHighlight(content string) string {
 		}
 
 		if i == sl {
-			result = append(result, highlightRegion(raw, cleanLines[i], sc, len(cleanLines[i])))
+			result = append(result, highlightRegion(raw, cleanLines[i], sc, utf8.RuneCountInString(cleanLines[i])))
 		} else if i == el {
 			end := ec
-			if end > len(cleanLines[i]) {
-				end = len(cleanLines[i])
+			cleanRuneCount := utf8.RuneCountInString(cleanLines[i])
+			if end > cleanRuneCount {
+				end = cleanRuneCount
 			}
 			result = append(result, highlightRegion(raw, cleanLines[i], 0, end))
 		} else {
@@ -242,15 +268,17 @@ func wrapFullLine(raw string) string {
 }
 
 // highlightRegion wraps a portion of raw (which may contain ANSI codes)
-// in reverse-video. cleanStart and cleanEnd are column indices in the
-// ANSI-stripped version of raw. Any ANSI reset sequences inside the
-// highlighted region are followed by a re-application of reverse video.
+// in reverse-video. cleanStart and cleanEnd are rune (display-column)
+// indices in the ANSI-stripped version of raw. Any ANSI reset sequences
+// inside the highlighted region are followed by a re-application of
+// reverse video.
 func highlightRegion(raw, clean string, start, end int) string {
-	if start >= len(clean) || start >= end {
+	cleanRunes := utf8.RuneCountInString(clean)
+	if start >= cleanRunes || start >= end {
 		return raw
 	}
-	if end > len(clean) {
-		end = len(clean)
+	if end > cleanRunes {
+		end = cleanRunes
 	}
 	// Map clean-column indices to raw byte offsets.
 	rawStart := cleanColToRaw(clean, raw, start)
@@ -288,19 +316,35 @@ func highlightRegion(raw, clean string, start, end int) string {
 	return sb.String()
 }
 
+// CleanColToRaw maps a column index in the ANSI-stripped string to a
+// byte offset in the raw string (which contains ANSI escapes and
+// multi-byte UTF-8 characters). Each rune — regardless of its byte
+// length — occupies exactly one display column.
+func CleanColToRaw(clean, raw string, col int) int {
+	return cleanColToRaw(clean, raw, col)
+}
+
 // cleanColToRaw maps a column index in the ANSI-stripped string to a
-// byte offset in the raw string (which contains ANSI escapes).
+// byte offset in the raw string (which contains ANSI escapes and
+// multi-byte UTF-8 characters). Each rune — regardless of its byte
+// length — occupies exactly one display column.
 func cleanColToRaw(clean, raw string, col int) int {
 	if col <= 0 {
 		return 0
 	}
 	ci := 0 // current clean-column position
 	for ri := 0; ri < len(raw); ri++ {
-		if raw[ri] == '\x1b' {
+		b := raw[ri]
+		if b == '\x1b' {
 			// Skip entire ANSI escape sequence.
 			for ri+1 < len(raw) && raw[ri] != 'm' {
 				ri++
 			}
+			continue
+		}
+		// Multi-byte UTF-8 continuation bytes (0x80–0xBF) don't start a
+		// new rune — skip them without incrementing the column counter.
+		if b&0xC0 == 0x80 {
 			continue
 		}
 		if ci == col {
