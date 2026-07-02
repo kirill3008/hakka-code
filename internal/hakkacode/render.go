@@ -99,13 +99,11 @@ func renderSessionFrame(frame ResponseFrame) string {
 
 // renderToolEvent renders a tool lifecycle frame.
 //
-// A successful call collapses to a single confirmation line — no
-// separate "start" header, no diff preview — since there's nothing to
-// act on. A failed call gets the full picture (header, diff/preview,
-// error) so there's enough context to debug it; toolStarts (keyed by
-// call ID) buffers "start" frames so that context is available once the
-// matching "err" frame arrives.
-func renderToolEvent(toolStarts map[string]ResponseFrame, frame ResponseFrame) string {
+// For "start", it returns nothing (the caller records the frame in
+// toolStarts).  For "ok" it returns a one-line confirmation.  For "err"
+// it returns the full picture (header, diff/preview if startFrame is
+// provided, error detail).
+func renderToolEvent(startFrame *ResponseFrame, frame ResponseFrame) string {
 	name := toolNameFromFrame(frame)
 	if name == "" {
 		name = "tool"
@@ -113,13 +111,7 @@ func renderToolEvent(toolStarts map[string]ResponseFrame, frame ResponseFrame) s
 
 	var b strings.Builder
 	switch frame.Status {
-	case "start":
-		if frame.ID != "" {
-			toolStarts[frame.ID] = frame
-		}
-		return ""
 	case "ok":
-		delete(toolStarts, frame.ID)
 		snippet := toolSnippet(frame)
 		if snippet != "" {
 			fmt.Fprintf(&b, "✓ %s · %s\n", name, snippet)
@@ -127,20 +119,18 @@ func renderToolEvent(toolStarts map[string]ResponseFrame, frame ResponseFrame) s
 			fmt.Fprintf(&b, "✓ %s\n", name)
 		}
 	case "err":
-		start, hadStart := toolStarts[frame.ID]
-		delete(toolStarts, frame.ID)
 		snippet := toolSnippet(frame)
 		if snippet != "" {
 			fmt.Fprintf(&b, "\n⏺ %s · %s\n", name, snippet)
 		} else {
 			fmt.Fprintf(&b, "\n⏺ %s\n", name)
 		}
-		if hadStart {
+		if startFrame != nil {
 			switch name {
 			case "edit_file":
-				b.WriteString(renderEditFileDiff(start.Args))
+				b.WriteString(renderEditFileDiff(startFrame.Args))
 			case "write_file":
-				b.WriteString(renderWriteFilePreview(start.Args))
+				b.WriteString(renderWriteFilePreview(startFrame.Args))
 			}
 		}
 		b.WriteString("  ✗ err\n")

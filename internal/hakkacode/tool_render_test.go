@@ -6,7 +6,6 @@ import (
 )
 
 func TestRenderToolEventStartIsSilent(t *testing.T) {
-	starts := map[string]ResponseFrame{}
 	frame := ResponseFrame{
 		Type:   "tool",
 		Tool:   "edit_file",
@@ -14,17 +13,13 @@ func TestRenderToolEventStartIsSilent(t *testing.T) {
 		Status: "start",
 		Args:   []byte(`{"path":"foo.go","old":"bar","new":"baz"}`),
 	}
-	out := renderToolEvent(starts, frame)
+	out := renderToolEvent(nil, frame)
 	if out != "" {
 		t.Fatalf("expected no output on a bare start event, got: %q", out)
-	}
-	if _, ok := starts["call_1"]; !ok {
-		t.Fatal("expected start frame to be buffered by call ID")
 	}
 }
 
 func TestRenderToolEventOkCollapsesToOneLine(t *testing.T) {
-	starts := map[string]ResponseFrame{"call_1": {Tool: "write_file", ID: "call_1", Status: "start"}}
 	frame := ResponseFrame{
 		Type:       "tool",
 		Tool:       "write_file",
@@ -33,7 +28,7 @@ func TestRenderToolEventOkCollapsesToOneLine(t *testing.T) {
 		Snippet:    "foo.go",
 		ToolResult: "Written 12 bytes to foo.go",
 	}
-	out := renderToolEvent(starts, frame)
+	out := renderToolEvent(nil, frame)
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 1 {
 		t.Fatalf("expected exactly one line for a successful call, got %d: %q", len(lines), out)
@@ -41,19 +36,14 @@ func TestRenderToolEventOkCollapsesToOneLine(t *testing.T) {
 	if !strings.Contains(out, "✓") || !strings.Contains(out, "write_file") {
 		t.Fatalf("expected a one-line ok confirmation, got: %q", out)
 	}
-	if _, ok := starts["call_1"]; ok {
-		t.Fatal("expected start buffer entry to be cleared on completion")
-	}
 }
 
 func TestRenderToolEventErrShowsFullDetail(t *testing.T) {
-	starts := map[string]ResponseFrame{
-		"call_1": {
-			Tool:   "edit_file",
-			ID:     "call_1",
-			Status: "start",
-			Args:   []byte(`{"path":"foo.go","old":"bar","new":"baz"}`),
-		},
+	startFrame := &ResponseFrame{
+		Tool:   "edit_file",
+		ID:     "call_1",
+		Status: "start",
+		Args:   []byte(`{"path":"foo.go","old":"bar","new":"baz"}`),
 	}
 	frame := ResponseFrame{
 		Type:   "tool",
@@ -62,7 +52,7 @@ func TestRenderToolEventErrShowsFullDetail(t *testing.T) {
 		Status: "err",
 		Error:  "pattern not found in foo.go",
 	}
-	out := renderToolEvent(starts, frame)
+	out := renderToolEvent(startFrame, frame)
 	if !strings.Contains(out, "- bar") || !strings.Contains(out, "+ baz") {
 		t.Fatalf("expected diff lines from the buffered start frame, got: %q", out)
 	}
@@ -71,5 +61,26 @@ func TestRenderToolEventErrShowsFullDetail(t *testing.T) {
 	}
 	if !strings.Contains(out, "pattern not found in foo.go") {
 		t.Fatalf("expected the error message, got: %q", out)
+	}
+}
+
+func TestRenderToolEventErrWithoutStartFrame(t *testing.T) {
+	frame := ResponseFrame{
+		Type:   "tool",
+		Tool:   "some_tool",
+		ID:     "call_1",
+		Status: "err",
+		Error:  "something went wrong",
+	}
+	out := renderToolEvent(nil, frame)
+	if !strings.Contains(out, "✗ err") {
+		t.Fatalf("expected err marker: %q", out)
+	}
+	if !strings.Contains(out, "something went wrong") {
+		t.Fatalf("expected error message: %q", out)
+	}
+	// Diff should not appear without a start frame.
+	if strings.Contains(out, "- ") || strings.Contains(out, "+ ") {
+		t.Fatalf("expected no diff lines without start frame: %q", out)
 	}
 }

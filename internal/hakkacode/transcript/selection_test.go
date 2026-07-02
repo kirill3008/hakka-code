@@ -84,3 +84,30 @@ func TestSelectionEmpty(t *testing.T) {
 		t.Fatal("expected empty highlight for empty content")
 	}
 }
+
+func TestSelectionAnsiContent(t *testing.T) {
+	// Content with ANSI escapes: visually "hello world" at columns 0-10,
+	// but the raw string has extra escape bytes.
+	content := "\x1b[2mhello\x1b[0m world"
+	sel := NewSelection()
+	sel.Start(0, 0)
+	sel.Extend(0, 5)
+	sel.Finish()
+
+	text := sel.Text(content)
+	if text != "hello" {
+		t.Fatalf("expected 'hello', got %q", text)
+	}
+
+	// Multi-line with ANSI.
+	content = "\x1b[2mhello\x1b[0m\n\x1b[1mworld\x1b[0m"
+	sel = NewSelection()
+	sel.Start(0, 0)
+	sel.Extend(1, 5)
+	sel.Finish()
+
+	text = sel.Text(content)
+	if text != "hello\nworld" {
+		t.Fatalf("expected 'hello\\nworld', got %q", text)
+	}
+}

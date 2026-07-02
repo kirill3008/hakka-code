@@ -1,6 +1,16 @@
 package transcript
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// stripANSI removes ANSI escape sequences from a string.
+func stripANSI(s string) string {
+	return ansiRE.ReplaceAllString(s, "")
+}
 
 // SelectionState is the phase of a text selection drag.
 type SelectionState int
@@ -98,23 +108,29 @@ func (s *Selection) Contains(line, col int) bool {
 	return true
 }
 
-// Text extracts the selected text from viewport content. The content
-// must be the same string that was passed to the viewport (i.e. with
-// newline-separated lines matching the line numbering used by Selection).
+// Text extracts the selected text from viewport content (which may
+// contain ANSI escapes). Returns clean text suitable for clipboard.
 func (s *Selection) Text(content string) string {
 	if !s.IsActive() || content == "" {
 		return ""
 	}
-	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+
+	// Build a parallel structure: cleanLines (ANSI-stripped) for
+	// indexing by mouse-column, rawLines for the output text.
+	rawLines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	cleanLines := make([]string, len(rawLines))
+	for i, l := range rawLines {
+		cleanLines[i] = stripANSI(l)
+	}
+
 	sl, sc, el, ec := s.Normalized()
 
-	if sl >= len(lines) || el >= len(lines) {
+	if sl >= len(cleanLines) || el >= len(cleanLines) {
 		return ""
 	}
 
 	if sl == el {
-		// Single-line selection.
-		line := lines[sl]
+		line := cleanLines[sl]
 		if sc >= len(line) {
 			return ""
 		}
@@ -125,21 +141,17 @@ func (s *Selection) Text(content string) string {
 		return line[sc:end]
 	}
 
-	// Multi-line selection.
 	var parts []string
-	// First line: from sc to end.
-	firstLine := lines[sl]
+	firstLine := cleanLines[sl]
 	if sc < len(firstLine) {
 		parts = append(parts, firstLine[sc:])
 	} else {
 		parts = append(parts, "")
 	}
-	// Middle lines: whole lines.
 	for i := sl + 1; i < el; i++ {
-		parts = append(parts, lines[i])
+		parts = append(parts, cleanLines[i])
 	}
-	// Last line: from start to ec.
-	lastLine := lines[el]
+	lastLine := cleanLines[el]
 	if ec > len(lastLine) {
 		ec = len(lastLine)
 	}
@@ -150,55 +162,156 @@ func (s *Selection) Text(content string) string {
 
 // ApplyHighlight overlays the selection highlight onto content.
 // Returns the content with reverse-video escapes around selected regions.
+// Handles embedded ANSI reset sequences (\033[0m, \033[27m) by
+// re-applying reverse video after each reset within a highlighted region.
 func (s *Selection) ApplyHighlight(content string) string {
 	if !s.IsActive() || content == "" {
 		return content
 	}
-	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	rawLines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	cleanLines := make([]string, len(rawLines))
+	for i, l := range rawLines {
+		cleanLines[i] = stripANSI(l)
+	}
 	sl, sc, el, ec := s.Normalized()
 
 	var result []string
-	for i, line := range lines {
+	for i, raw := range rawLines {
 		if i < sl || i > el {
-			result = append(result, line)
+			result = append(result, raw)
 			continue
 		}
 
 		if sl == el {
-			// Single-line: wrap from sc to ec.
-			result = append(result, highlightRegion(line, sc, ec))
+			result = append(result, highlightRegion(raw, cleanLines[i], sc, ec))
 			continue
 		}
 
 		if i == sl {
-			// First line: from sc to end.
-			result = append(result, highlightRegion(line, sc, len(line)))
+			result = append(result, highlightRegion(raw, cleanLines[i], sc, len(cleanLines[i])))
 		} else if i == el {
-			// Last line: from start to ec.
-			if ec > len(line) {
-				ec = len(line)
+			end := ec
+			if end > len(cleanLines[i]) {
+				end = len(cleanLines[i])
 			}
-			result = append(result, highlightRegion(line, 0, ec))
+			result = append(result, highlightRegion(raw, cleanLines[i], 0, end))
 		} else {
-			// Middle line: full line.
-			result = append(result, "\x1b[7m"+line+"\x1b[27m")
+			// Middle line: wrap whole line in reverse video, but
+			// re-apply reverse after any embedded reset sequences
+			// (\033[0m or \033[27m) within the content.
+			result = append(result, wrapFullLine(raw))
 		}
 	}
 
 	return strings.Join(result, "\n")
 }
 
+// wrapFullLine wraps an entire line in reverse video, handling any
+// embedded ANSI reset sequences that would cancel the highlight.
+func wrapFullLine(raw string) string {
+	if raw == "" {
+		return ansiReverse + ansiReset
+	}
+	var sb strings.Builder
+	sb.WriteString(ansiReverse)
+
+	for i := 0; i < len(raw); {
+		if raw[i] == '\x1b' {
+			// Find the end of the escape sequence.
+			start := i
+			for i < len(raw) && raw[i] != 'm' {
+				i++
+			}
+			if i < len(raw) {
+				i++ // include the 'm'
+			}
+			seq := raw[start:i]
+			sb.WriteString(seq)
+			// After \033[0m or \033[27m, re-apply reverse video.
+			if seq == "\x1b[0m" || seq == "\x1b[27m" {
+				sb.WriteString(ansiReverse)
+			}
+		} else {
+			sb.WriteByte(raw[i])
+			i++
+		}
+	}
+
+	sb.WriteString(ansiReset)
+	return sb.String()
+}
+
+// highlightRegion wraps a portion of raw (which may contain ANSI codes)
+// in reverse-video. cleanStart and cleanEnd are column indices in the
+// ANSI-stripped version of raw. Any ANSI reset sequences inside the
+// highlighted region are followed by a re-application of reverse video.
+func highlightRegion(raw, clean string, start, end int) string {
+	if start >= len(clean) || start >= end {
+		return raw
+	}
+	if end > len(clean) {
+		end = len(clean)
+	}
+	// Map clean-column indices to raw byte offsets.
+	rawStart := cleanColToRaw(clean, raw, start)
+	rawEnd := cleanColToRaw(clean, raw, end)
+
+	// Build: prefix + reverse + middle(re-applied) + reset + suffix.
+	var sb strings.Builder
+	sb.WriteString(raw[:rawStart])
+	sb.WriteString(ansiReverse)
+
+	// Write the middle region, re-applying reverse after each reset.
+	middle := raw[rawStart:rawEnd]
+	for i := 0; i < len(middle); {
+		if middle[i] == '\x1b' {
+			seqStart := i
+			for i < len(middle) && middle[i] != 'm' {
+				i++
+			}
+			if i < len(middle) {
+				i++ // include 'm'
+			}
+			seq := middle[seqStart:i]
+			sb.WriteString(seq)
+			if seq == "\x1b[0m" || seq == "\x1b[27m" {
+				sb.WriteString(ansiReverse)
+			}
+		} else {
+			sb.WriteByte(middle[i])
+			i++
+		}
+	}
+
+	sb.WriteString(ansiReset)
+	sb.WriteString(raw[rawEnd:])
+	return sb.String()
+}
+
+// cleanColToRaw maps a column index in the ANSI-stripped string to a
+// byte offset in the raw string (which contains ANSI escapes).
+func cleanColToRaw(clean, raw string, col int) int {
+	if col <= 0 {
+		return 0
+	}
+	ci := 0 // current clean-column position
+	for ri := 0; ri < len(raw); ri++ {
+		if raw[ri] == '\x1b' {
+			// Skip entire ANSI escape sequence.
+			for ri+1 < len(raw) && raw[ri] != 'm' {
+				ri++
+			}
+			continue
+		}
+		if ci == col {
+			return ri
+		}
+		ci++
+	}
+	return len(raw)
+}
+
 const (
 	ansiReverse = "\x1b[7m"
 	ansiReset   = "\x1b[27m"
 )
-
-func highlightRegion(line string, start, end int) string {
-	if start >= len(line) || start >= end {
-		return line
-	}
-	if end > len(line) {
-		end = len(line)
-	}
-	return line[:start] + ansiReverse + line[start:end] + ansiReset + line[end:]
-}

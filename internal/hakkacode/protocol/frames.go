@@ -1,12 +1,7 @@
-// Package protocol defines the Hakka v2 wire protocol types.
+// Package protocol defines the Hakka v2 wire protocol types and constants.
 //
 // Every frame (inbound and outbound) has a mandatory "type" field that acts
 // as the sole discriminant.
-//
-// Inbound types:  "chat", "cmd", "resp", "cancel"
-// Outbound types: "welcome", "delta", "done", "tool", "usage", "req",
-//
-//	"result", "session", "error"
 //
 // LLM content is always carried in a field called "text".
 package protocol
@@ -128,3 +123,54 @@ func intFromAny(v any) int {
 		return 0
 	}
 }
+
+// Frame type constants.
+const (
+	TypeChat    = "chat"
+	TypeCmd     = "cmd"
+	TypeResp    = "resp"
+	TypeCancel  = "cancel"
+	TypeWelcome = "welcome"
+	TypeDelta   = "delta"
+	TypeDone    = "done"
+	TypeTool    = "tool"
+	TypeUsage   = "usage"
+	TypeReq     = "req"
+	TypeResult  = "result"
+	TypeSession = "session"
+	TypeError   = "error"
+)
+
+// Tool status constants.
+const (
+	StatusStart = "start"
+	StatusOK    = "ok"
+	StatusErr   = "err"
+)
+
+// Command name constants.
+const (
+	CmdSessionList       = "session_list"
+	CmdSessionInfo       = "session_info"
+	CmdSessionCreate     = "session_create"
+	CmdSessionRename     = "session_rename"
+	CmdSessionAutoRename = "session_autorename"
+	CmdSessionDelete     = "session_delete"
+	CmdGetSession        = "get_session"
+	CmdModelList         = "model_list"
+	CmdModelSwitch       = "model_switch"
+	CmdToolList          = "tool_list"
+	CmdToolAllow         = "tool_allow"
+	CmdToolDeny          = "tool_deny"
+	CmdCWDSet            = "cwd_set"
+	CmdCompact           = "compact"
+)
+
+// Click action constants.
+const (
+	ActionSessionSwitch = "session-switch"
+	ActionModelSwitch   = "model-switch"
+	ActionToolAllow     = "tool-allow"
+	ActionToolDeny      = "tool-deny"
+	ActionCopy          = "copy"
+)

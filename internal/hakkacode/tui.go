@@ -2,6 +2,7 @@ package hakkacode
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"hakka-code/internal/hakkacode/backend"
+	"hakka-code/internal/hakkacode/protocol"
 	"hakka-code/internal/hakkacode/transcript"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -34,7 +37,7 @@ type Config struct {
 // Run connects to the backend and drives the interactive TUI until the
 // user quits or ctx is cancelled (e.g. SIGTERM).
 func Run(ctx context.Context, cfg Config) error {
-	client, err := Dial(ctx, cfg.Addr)
+	client, err := backend.Dial(ctx, cfg.Addr)
 	if err != nil {
 		return err
 	}
@@ -95,7 +98,7 @@ type copyToClipboardMsg struct {
 type model struct {
 	ctx    context.Context
 	cfg    Config
-	client *Client
+	client backend.Backend
 
 	sessionID   string
 	sessionName string
@@ -123,7 +126,7 @@ type model struct {
 	historyDraft string
 }
 
-func newModel(ctx context.Context, cfg Config, client *Client) model {
+func newModel(ctx context.Context, cfg Config, client backend.Backend) model {
 	ta := textarea.New()
 	ta.Prompt = "❯ "
 	ta.Placeholder = "Type a message, or /help for commands"
@@ -158,7 +161,7 @@ func (m model) Init() tea.Cmd {
 
 // --- boot sequence ---
 
-func bootCmd(ctx context.Context, client *Client, cfg Config) tea.Cmd {
+func bootCmd(ctx context.Context, client backend.Backend, cfg Config) tea.Cmd {
 	return func() tea.Msg {
 		if _, err := client.Read(ctx); err != nil {
 			return bootMsg{err: fmt.Errorf("read welcome: %w", err)}
@@ -190,7 +193,7 @@ func bootCmd(ctx context.Context, client *Client, cfg Config) tea.Cmd {
 	}
 }
 
-func resumeOrCreateSession(ctx context.Context, client *Client) (*SessionSummary, string, []map[string]any, bool, error) {
+func resumeOrCreateSession(ctx context.Context, client backend.Backend) (*SessionSummary, string, []map[string]any, bool, error) {
 	recent, err := client.MostRecentSession(ctx)
 	if err != nil {
 		return nil, "", nil, false, err
@@ -209,7 +212,7 @@ func resumeOrCreateSession(ctx context.Context, client *Client) (*SessionSummary
 
 // --- async command helpers ---
 
-func waitFrame(ctx context.Context, client *Client) tea.Cmd {
+func waitFrame(ctx context.Context, client backend.Backend) tea.Cmd {
 	return func() tea.Msg {
 		frame, err := client.Read(ctx)
 		if err != nil {
@@ -219,14 +222,14 @@ func waitFrame(ctx context.Context, client *Client) tea.Cmd {
 	}
 }
 
-func execRemoteCmd(ctx context.Context, client *Client, sessionID, cmd string, params map[string]any) tea.Cmd {
+func execRemoteCmd(ctx context.Context, client backend.Backend, sessionID, cmd string, params map[string]any) tea.Cmd {
 	return func() tea.Msg {
 		frame, err := client.ExecuteCommand(ctx, sessionID, cmd, params)
 		return cmdResultMsg{cmd: cmd, frame: frame, err: err}
 	}
 }
 
-func autoRenameCmd(ctx context.Context, client *Client, sessionID string) tea.Cmd {
+func autoRenameCmd(ctx context.Context, client backend.Backend, sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		frame, err := client.ExecuteCommand(ctx, sessionID, "session_autorename", nil)
 		if err != nil || frame.Error != "" {
@@ -238,7 +241,7 @@ func autoRenameCmd(ctx context.Context, client *Client, sessionID string) tea.Cm
 	}
 }
 
-func cancelTurnCmd(client *Client, sessionID string) tea.Cmd {
+func cancelTurnCmd(client backend.Backend, sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		_ = client.Cancel(sessionID)
 		return nil
@@ -323,6 +326,10 @@ func (m *model) recomputeViewportHeight() {
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.selection.State == transcript.SelDone {
+		m.selection.Clear()
+	}
+
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		if m.turnActive {
@@ -606,24 +613,32 @@ func (m model) handleFrame(frame ResponseFrame) (tea.Model, tea.Cmd) {
 		m.sessionID = frame.SessionID
 	}
 
-	if frame.Type == "req" {
+	if frame.Type == protocol.TypeReq {
 		_ = m.client.ReplyUnsupportedClientRequest(frame)
 		return m, waitFrame(m.ctx, m.client)
 	}
 
 	switch frame.Type {
-	case "delta":
+	case protocol.TypeDelta:
 		m.spinLabel = "Writing response"
-	case "tool":
+	case protocol.TypeTool:
 		m.sawTool = true
-		if frame.Status == "start" {
-			renderToolEvent(m.toolStarts, frame)
+		if frame.Status == protocol.StatusStart {
+			if frame.ID != "" {
+				m.toolStarts[frame.ID] = frame
+			}
 			m.spinLabel = toolsLabel(m.toolStarts)
 		} else {
-			out := renderToolEvent(m.toolStarts, frame)
+			var startFrame *ResponseFrame
+			if s, ok := m.toolStarts[frame.ID]; ok {
+				startFrame = &s
+			}
+			delete(m.toolStarts, frame.ID)
+
+			out := renderToolEvent(startFrame, frame)
 			if out != "" {
 				status := transcript.ToolOK
-				if frame.Status == "err" {
+				if frame.Status == protocol.StatusErr {
 					status = transcript.ToolErr
 				}
 				snippet := toolSnippet(frame)
@@ -631,9 +646,8 @@ func (m model) handleFrame(frame ResponseFrame) (tea.Model, tea.Cmd) {
 			}
 			m.spinLabel = toolsLabel(m.toolStarts)
 		}
-	case "usage":
-		// Not surfaced live; final totals land in the "done" statusline.
-	case "done":
+	case protocol.TypeUsage:
+	case protocol.TypeDone:
 		m.turnActive = false
 		if frame.Text != "" {
 			if m.sawTool {
@@ -852,15 +866,15 @@ func (m *model) viewportContent() string {
 
 func (m model) dispatchClickAction(action transcript.ClickAction) (tea.Model, tea.Cmd) {
 	switch action.Action {
-	case "session-switch":
-		return m, execRemoteCmd(m.ctx, m.client, m.sessionID, "get_session", map[string]any{"id": action.Payload})
-	case "model-switch":
-		return m, execRemoteCmd(m.ctx, m.client, m.sessionID, "model_switch", map[string]any{"name": action.Payload})
-	case "tool-allow":
-		return m, toolToggleThenRefresh(m.ctx, m.client, m.sessionID, "tool_allow", action.Payload)
-	case "tool-deny":
-		return m, toolToggleThenRefresh(m.ctx, m.client, m.sessionID, "tool_deny", action.Payload)
-	case "copy":
+	case protocol.ActionSessionSwitch:
+		return m, execRemoteCmd(m.ctx, m.client, m.sessionID, protocol.CmdGetSession, map[string]any{"id": action.Payload})
+	case protocol.ActionModelSwitch:
+		return m, execRemoteCmd(m.ctx, m.client, m.sessionID, protocol.CmdModelSwitch, map[string]any{"name": action.Payload})
+	case protocol.ActionToolAllow:
+		return m, toolToggleThenRefresh(m.ctx, m.client, m.sessionID, protocol.CmdToolAllow, action.Payload)
+	case protocol.ActionToolDeny:
+		return m, toolToggleThenRefresh(m.ctx, m.client, m.sessionID, protocol.CmdToolDeny, action.Payload)
+	case protocol.ActionCopy:
 		return m, func() tea.Msg { return copyToClipboardMsg{text: action.Payload} }
 	}
 	return m, nil
@@ -869,10 +883,10 @@ func (m model) dispatchClickAction(action transcript.ClickAction) (tea.Model, te
 // toolToggleThenRefresh returns a command that fires a tool allow/deny
 // (whose response is silenced by handleCmdResult) followed by a tool_list
 // refresh (which renders the updated interactive list).
-func toolToggleThenRefresh(ctx context.Context, client *Client, sessionID, toggleCmd, toolName string) tea.Cmd {
+func toolToggleThenRefresh(ctx context.Context, client backend.Backend, sessionID, toggleCmd, toolName string) tea.Cmd {
 	return tea.Sequence(
 		execRemoteCmd(ctx, client, sessionID, toggleCmd, map[string]any{"name": toolName}),
-		execRemoteCmd(ctx, client, sessionID, "tool_list", nil),
+		execRemoteCmd(ctx, client, sessionID, protocol.CmdToolList, nil),
 	)
 }
 
@@ -894,40 +908,7 @@ func (m *model) entryRenderer(entry *transcript.TranscriptEntry, width int) []st
 }
 
 func (m model) handleCopyToClipboard(msg copyToClipboardMsg) (tea.Model, tea.Cmd) {
-	// OSC 52 clipboard write. The terminal must support it.
-	// We emit the escape sequence directly via a Printf cmd so it
-	// reaches stdout even though Bubble Tea owns the terminal.
-	return m, tea.Printf("\x1b]52;c;%s\x07", base64Encode(msg.text))
-}
-
-func base64Encode(s string) string {
-	// Simple base64 encoder without importing encoding/base64 just for this.
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	var result strings.Builder
-	bs := []byte(s)
-	for i := 0; i < len(bs); i += 3 {
-		var b [3]byte
-		b[0] = bs[i]
-		if i+1 < len(bs) {
-			b[1] = bs[i+1]
-		}
-		if i+2 < len(bs) {
-			b[2] = bs[i+2]
-		}
-		result.WriteByte(alphabet[b[0]>>2])
-		result.WriteByte(alphabet[((b[0]&0x03)<<4)|(b[1]>>4)])
-		if i+1 < len(bs) {
-			result.WriteByte(alphabet[((b[1]&0x0f)<<2)|(b[2]>>6)])
-		} else {
-			result.WriteByte('=')
-		}
-		if i+2 < len(bs) {
-			result.WriteByte(alphabet[b[2]&0x3f])
-		} else {
-			result.WriteByte('=')
-		}
-	}
-	return result.String()
+	return m, tea.Printf("\x1b]52;c;%s\x07", base64.StdEncoding.EncodeToString([]byte(msg.text)))
 }
 
 // --- View ---
