@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -17,6 +18,16 @@ type Client struct {
 	addr string
 	conn *websocket.Conn
 	mu   sync.Mutex
+
+	// A websocket connection supports only one concurrent reader, so a
+	// single background pump goroutine owns conn.ReadJSON for the
+	// connection's whole lifetime and fans frames out through this
+	// channel. Read(ctx) just drains it — safe to call from anywhere
+	// (a command waiter, a chat-turn loop, a TUI event loop) as long as
+	// only one caller drains at a time, which matches how this client is
+	// actually used (one action in flight at a time).
+	frames  chan ResponseFrame
+	readErr chan error
 }
 
 func Dial(ctx context.Context, addr string) (*Client, error) {
@@ -32,7 +43,27 @@ func Dial(ctx context.Context, addr string) (*Client, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("connect %s: unexpected http status %s", addr, resp.Status)
 	}
-	return &Client{addr: addr, conn: conn}, nil
+	c := &Client{
+		addr:    addr,
+		conn:    conn,
+		frames:  make(chan ResponseFrame, 32),
+		readErr: make(chan error, 1),
+	}
+	go c.pump()
+	return c, nil
+}
+
+// pump is the connection's sole reader for its entire lifetime.
+func (c *Client) pump() {
+	for {
+		var frame ResponseFrame
+		if err := c.conn.ReadJSON(&frame); err != nil {
+			c.readErr <- err
+			close(c.frames)
+			return
+		}
+		c.frames <- frame
+	}
 }
 
 func (c *Client) Close() error {
@@ -54,24 +85,23 @@ func (c *Client) Send(v any) error {
 	return c.conn.WriteJSON(v)
 }
 
+// Read returns the next frame from the connection, or an error if ctx is
+// done or the connection's read pump has stopped (closed/broken
+// connection).
 func (c *Client) Read(ctx context.Context) (ResponseFrame, error) {
-	type result struct {
-		frame ResponseFrame
-		err   error
-	}
-
-	ch := make(chan result, 1)
-	go func() {
-		var frame ResponseFrame
-		err := c.conn.ReadJSON(&frame)
-		ch <- result{frame: frame, err: err}
-	}()
-
 	select {
 	case <-ctx.Done():
 		return ResponseFrame{}, ctx.Err()
-	case res := <-ch:
-		return res.frame, res.err
+	case frame, ok := <-c.frames:
+		if !ok {
+			select {
+			case err := <-c.readErr:
+				return ResponseFrame{}, err
+			default:
+				return ResponseFrame{}, io.EOF
+			}
+		}
+		return frame, nil
 	}
 }
 
@@ -190,14 +220,15 @@ func (c *Client) MostRecentSession(ctx context.Context) (map[string]any, error) 
 	return sessions[0], nil
 }
 
-// GetSession fetches a session by id or unique prefix.
-func (c *Client) GetSession(ctx context.Context, id string) (*SessionSummary, string, error) {
+// GetSession fetches a session by id or unique prefix, along with its
+// stored message history.
+func (c *Client) GetSession(ctx context.Context, id string) (*SessionSummary, string, []map[string]any, error) {
 	frame, err := c.ExecuteCommand(ctx, "", "get_session", map[string]any{"id": id})
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if frame.Error != "" {
-		return nil, "", errors.New(frame.Error)
+		return nil, "", nil, errors.New(frame.Error)
 	}
 	sessionID := frame.SessionID
 	var summary *SessionSummary
@@ -208,9 +239,9 @@ func (c *Client) GetSession(ctx context.Context, id string) (*SessionSummary, st
 		}
 	}
 	if sessionID == "" {
-		return nil, "", fmt.Errorf("get_session returned no session id")
+		return nil, "", nil, fmt.Errorf("get_session returned no session id")
 	}
-	return summary, sessionID, nil
+	return summary, sessionID, frame.Messages, nil
 }
 
 func (c *Client) CreateSession(ctx context.Context) (*SessionSummary, string, error) {

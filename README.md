@@ -6,21 +6,26 @@ This repository is intentionally separate from the upstream Hakka backend for no
 
 ## Status
 
-Early MVP, protocol v2.
+Early MVP, protocol v2. A Bubble Tea TUI (previously a plain line-based REPL).
 
 Current features:
 
 - Connects to Hakka's v2 WebSocket protocol
-- Resumes the most recently updated non-empty session on startup, or creates a fresh one
+- Full-screen TUI: scrollable transcript viewport (PgUp/PgDown, Up/Down, mouse wheel where the terminal maps wheel scroll to arrow keys) pinned above a persistent input box. No mouse mode, so the terminal's native text selection/copy still works
+- Resumes the most recently updated non-empty session on startup and replays its history, or creates a fresh one
 - Sets session cwd to the current directory
 - Enables tools on startup (`#all` by default, configurable)
-- Simple REPL chat loop with markdown-rendered assistant replies (via glamour)
+- Markdown-rendered assistant replies (via glamour, with custom heading/table/code-block/hr handling)
 - Diff-style rendering for `edit_file`/`write_file` tool calls
 - Auto-renames a session (via LLM) after its first exchange
 - Per-turn statusline: model, token/context usage, cost
 - Animated spinner while waiting on the LLM or a running tool, so a quiet turn doesn't look hung
 - Ctrl+C cancels the in-flight turn (not the whole program); a second Ctrl+C at the idle prompt exits normally
+- You can keep typing while a turn is in flight — Enter is deferred until it finishes
+- Growing multi-line input box (up to 6 lines) instead of horizontal scrolling
+- Ctrl+P/Ctrl+N browse prompt history
 - Tool calls collapse to a single confirmation line on success; full detail (diff/preview, error) only shows on failure
+- `/session list`, `/model list`, `/tool list`, etc. render as human-readable tables (with local timestamps) instead of raw JSON
 - Client-side slash command parsing
 - Optional config file at `~/.hakka-code.json` (`addr`, `enable_tags`)
 
@@ -59,7 +64,7 @@ Custom backend address:
 
 ## Commands
 
-Inside the REPL:
+Inside the TUI:
 
 ```text
 /help                    Show help
@@ -95,6 +100,8 @@ Optional `~/.hakka-code.json` (CLI flags always override):
 
 Likely next iterations:
 
-1. Replace the REPL with a Bubble Tea TUI for true incremental rendering (today, assistant text is rendered as markdown only once the turn completes) and to allow typing ahead while a turn streams.
-2. Session switch should reload/display history nicely.
-3. Add collapsible tool output.
+1. True incremental rendering — assistant text is still rendered as markdown only once the turn completes, not token-by-token.
+2. Add collapsible tool output.
+3. Wide tables currently overflow the terminal width rather than wrapping/scrolling — no clear best fix chosen yet.
+4. Pasting a very long single-line query into the input box can leave it scrolled to the wrong position until the next keystroke.
+5. Mouse wheel scroll now works on terminals that map wheel scroll to arrow keys without mouse mode enabled (Up/Down scroll the transcript by a line at the input box's edge) — but that's terminal-dependent, not a real mouse binding. A terminal that maps wheel to something else, or that doesn't do this synthesis at all, won't get wheel scroll. Properly supporting mouse wheel unconditionally, without losing native copy, means implementing our own mouse-driven text selection (own highlight rendering + clipboard write via OSC 52), like Claude Code's CLI reportedly does — a real feature, not a quick fix.

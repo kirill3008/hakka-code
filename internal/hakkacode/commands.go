@@ -140,5 +140,10 @@ func HelpText() string {
   /tool deny <name|#tag>    Disable a tool or tag
   /cwd <path>               Set session working directory
   /compact [n]              Show or set context soft limit
+
+Keys:
+  Ctrl+P / Ctrl+N           Previous/next prompt from history
+  PgUp / PgDown             Scroll the transcript by a page
+  Up / Down / mouse wheel   Scroll the transcript by a line
 `
 }

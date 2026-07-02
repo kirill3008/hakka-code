@@ -1,28 +1,9 @@
 package hakkacode
 
 import (
-	"bytes"
-	"io"
-	"os"
 	"strings"
 	"testing"
 )
-
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := os.Stdout
-	os.Stdout = w
-	fn()
-	w.Close()
-	os.Stdout = old
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-	return buf.String()
-}
 
 func TestRenderToolEventStartIsSilent(t *testing.T) {
 	starts := map[string]ResponseFrame{}
@@ -33,7 +14,7 @@ func TestRenderToolEventStartIsSilent(t *testing.T) {
 		Status: "start",
 		Args:   []byte(`{"path":"foo.go","old":"bar","new":"baz"}`),
 	}
-	out := captureStdout(t, func() { renderToolEvent(starts, frame) })
+	out := renderToolEvent(starts, frame)
 	if out != "" {
 		t.Fatalf("expected no output on a bare start event, got: %q", out)
 	}
@@ -52,7 +33,7 @@ func TestRenderToolEventOkCollapsesToOneLine(t *testing.T) {
 		Snippet:    "foo.go",
 		ToolResult: "Written 12 bytes to foo.go",
 	}
-	out := captureStdout(t, func() { renderToolEvent(starts, frame) })
+	out := renderToolEvent(starts, frame)
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 1 {
 		t.Fatalf("expected exactly one line for a successful call, got %d: %q", len(lines), out)
@@ -81,7 +62,7 @@ func TestRenderToolEventErrShowsFullDetail(t *testing.T) {
 		Status: "err",
 		Error:  "pattern not found in foo.go",
 	}
-	out := captureStdout(t, func() { renderToolEvent(starts, frame) })
+	out := renderToolEvent(starts, frame)
 	if !strings.Contains(out, "- bar") || !strings.Contains(out, "+ baz") {
 		t.Fatalf("expected diff lines from the buffered start frame, got: %q", out)
 	}

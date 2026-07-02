@@ -52,7 +52,7 @@ func splitTableRow(line string) []string {
 	parts := strings.Split(t, "|")
 	cells := make([]string, len(parts))
 	for i, p := range parts {
-		cells[i] = strings.TrimSpace(p)
+		cells[i] = renderInline(strings.TrimSpace(p))
 	}
 	return cells
 }

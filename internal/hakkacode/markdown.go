@@ -3,6 +3,7 @@ package hakkacode
 import (
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/ansi"
@@ -11,14 +12,20 @@ import (
 	"golang.org/x/term"
 )
 
-// renderMarkdown renders text as terminal-formatted markdown.
-//
-// Glamour's default document-oriented layout doesn't fit a chat turn well:
-// it stretches tables to the full terminal width and (by design, per its
-// style JSON) prints literal "##"/"###" markers for h2-h6 headings. So we
-// hand-split the text into code/table/prose blocks and render each with
-// the tool best suited to it — prose still goes through glamour (with a
-// heading style fix), but code blocks and tables get their own renderers.
+// isDarkBackground is memoized: termenv queries it via a raw stdin read,
+// which races Bubble Tea's own input reader if run after startup (leaks
+// garbage like "]11;rgb:..." into whatever's focused).
+var isDarkBackground = sync.OnceValue(termenv.HasDarkBackground)
+
+// detectTerminalTheme must run before tea.Program starts — see
+// isDarkBackground.
+func detectTerminalTheme() {
+	isDarkBackground()
+}
+
+// renderMarkdown hand-splits code/table/prose blocks and renders each
+// separately — glamour's own table/heading defaults don't fit a chat
+// turn well (full-width tables, literal "#" markers for h2-h6).
 func renderMarkdown(text string) string {
 	if strings.TrimSpace(text) == "" {
 		return text
@@ -64,7 +71,7 @@ func headingFixedStyle() ansi.StyleConfig {
 	switch {
 	case !term.IsTerminal(int(os.Stdout.Fd())):
 		cfg = styles.NoTTYStyleConfig
-	case termenv.HasDarkBackground():
+	case isDarkBackground():
 		cfg = styles.DarkStyleConfig
 	default:
 		cfg = styles.LightStyleConfig
