@@ -23,7 +23,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// os.Interrupt (Ctrl+C) is deliberately NOT wired into this context —
+	// the App handles it itself, scoped to the lifetime of an in-flight
+	// turn (cancel the turn), falling back to Go's default
+	// terminate-the-process behavior whenever no turn is running (e.g.
+	// at the idle REPL prompt).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 
 	cfg := hakkacode.Config{

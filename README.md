@@ -18,7 +18,9 @@ Current features:
 - Diff-style rendering for `edit_file`/`write_file` tool calls
 - Auto-renames a session (via LLM) after its first exchange
 - Per-turn statusline: model, token/context usage, cost
-- Renders basic tool lifecycle events
+- Animated spinner while waiting on the LLM or a running tool, so a quiet turn doesn't look hung
+- Ctrl+C cancels the in-flight turn (not the whole program); a second Ctrl+C at the idle prompt exits normally
+- Tool calls collapse to a single confirmation line on success; full detail (diff/preview, error) only shows on failure
 - Client-side slash command parsing
 - Optional config file at `~/.hakka-code.json` (`addr`, `enable_tags`)
 
@@ -93,7 +95,6 @@ Optional `~/.hakka-code.json` (CLI flags always override):
 
 Likely next iterations:
 
-1. Ctrl+C/Esc cancellation while a turn is streaming (needs concurrent stdin + socket reads).
-2. Replace the REPL with a Bubble Tea TUI for true incremental rendering (today, assistant text is rendered as markdown only once the turn completes).
-3. Session switch should reload/display history nicely.
-4. Add collapsible tool output.
+1. Replace the REPL with a Bubble Tea TUI for true incremental rendering (today, assistant text is rendered as markdown only once the turn completes) and to allow typing ahead while a turn streams.
+2. Session switch should reload/display history nicely.
+3. Add collapsible tool output.

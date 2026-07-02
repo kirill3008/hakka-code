@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 )
 
@@ -205,7 +206,38 @@ func (a *App) sendUserInput(ctx context.Context, input string) error {
 		return err
 	}
 	fmt.Println()
-	if err := a.readUntilDone(ctx); err != nil {
+
+	spin := newSpinner()
+	spin.Start("Thinking")
+
+	// Ctrl+C cancels this turn, not the whole program. We deliberately
+	// register os.Interrupt only for the lifetime of the turn — Go's
+	// default SIGINT handling (terminate the process) applies whenever
+	// nothing else is listening, e.g. at the idle "> " prompt, so a
+	// second Ctrl+C after the turn wraps up still exits normally.
+	//
+	// We don't cancel our own read loop locally: the server always sends
+	// a terminal "done" frame even after cancellation, so waiting for it
+	// avoids leaving a stray frame in the socket for the next read to
+	// misinterpret.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	defer signal.Stop(sigCh)
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		for {
+			select {
+			case <-sigCh:
+				spin.SetLabel("Cancelling")
+				_ = a.client.Cancel(a.sessionID)
+			case <-watchDone:
+				return
+			}
+		}
+	}()
+
+	if err := a.readUntilDone(ctx, spin); err != nil {
 		return err
 	}
 	a.maybeAutoRename(ctx)
@@ -230,14 +262,17 @@ func (a *App) maybeAutoRename(ctx context.Context) {
 }
 
 // readUntilDone streams a chat turn's frames to the terminal until the
-// terminal "done" frame arrives.
+// terminal "done" frame arrives. spin animates while nothing is being
+// printed, so a turn that's just waiting on the LLM (or a slow tool)
+// doesn't look like the program hung.
 //
 // Text deltas are not printed live — the final "done" frame always
 // carries the complete reply text, which is rendered as markdown in one
 // pass. Tool events still render live in between, so a long tool-using
 // turn isn't silent. True incremental markdown rendering needs a real
 // TUI (redrawing previously-printed lines) and is tracked for Phase 2.
-func (a *App) readUntilDone(ctx context.Context) error {
+func (a *App) readUntilDone(ctx context.Context, spin *spinner) error {
+	defer spin.Stop()
 	sawTool := false
 	toolStarts := map[string]ResponseFrame{}
 	for {
@@ -257,13 +292,21 @@ func (a *App) readUntilDone(ctx context.Context) error {
 
 		switch frame.Type {
 		case "delta":
-			// Buffered — see final "done" text below.
+			spin.SetLabel("Writing response")
 		case "tool":
 			sawTool = true
-			renderToolEvent(toolStarts, frame)
+			if frame.Status == "start" {
+				renderToolEvent(toolStarts, frame)
+				spin.SetLabel(toolsLabel(toolStarts))
+			} else {
+				spin.Stop()
+				renderToolEvent(toolStarts, frame)
+				spin.Start(toolsLabel(toolStarts))
+			}
 		case "usage":
 			// Keep MVP quiet. Later this can feed a statusline.
 		case "done":
+			spin.Stop()
 			if frame.Text != "" {
 				if sawTool {
 					fmt.Println()
@@ -278,6 +321,26 @@ func (a *App) readUntilDone(ctx context.Context) error {
 			renderStatusline(frame.Stats)
 			return nil
 		}
+	}
+}
+
+// toolsLabel summarizes the currently in-flight tool calls for the
+// spinner label. Multiple calls can be running concurrently (the engine
+// fans out tool execution), so this collapses to a count once there's
+// more than one.
+func toolsLabel(running map[string]ResponseFrame) string {
+	switch len(running) {
+	case 0:
+		return "Thinking"
+	case 1:
+		for _, f := range running {
+			if f.Tool != "" {
+				return "Running " + f.Tool
+			}
+		}
+		return "Running tool"
+	default:
+		return fmt.Sprintf("Running %d tools", len(running))
 	}
 }
 
