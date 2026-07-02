@@ -32,6 +32,32 @@ func boolField(m map[string]any, key string) bool {
 	return b
 }
 
+// toolArgsSnippet extracts a human-readable snippet from stored tool args.
+// name is the tool name; args is the raw args map from the stored message.
+func toolArgsSnippet(name string, args any) string {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return ""
+	}
+	switch name {
+	case "shell":
+		if c := strField(m, "cmd"); c != "" {
+			return c
+		}
+	case "http_get":
+		if u := strField(m, "url"); u != "" {
+			return u
+		}
+	}
+	// file tools: show path
+	for _, key := range []string{"path", "pattern", "url"} {
+		if v := strField(m, key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func stringItems(v any) []string {
 	arr, _ := v.([]any)
 	out := make([]string, 0, len(arr))
@@ -201,6 +227,12 @@ func formatMessageHistory(messages []map[string]any) string {
 			snippet := strField(m, "snippet")
 			if snippet == "" {
 				snippet = strField(m, "result")
+			}
+			if snippet == "" {
+				// Try to extract a human-readable snippet from args.
+				if args, ok := m["args"]; ok {
+					snippet = toolArgsSnippet(name, args)
+				}
 			}
 			if snippet == "" {
 				snippet = compactJSONStr(content)

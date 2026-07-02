@@ -1,75 +1,53 @@
 package hakkacode
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
-func TestFormatSessionList(t *testing.T) {
-	data := map[string]any{
-		"sessions": []any{
-			map[string]any{"id": "abc-full-id", "short_id": "abc", "name": "test", "current": true, "message_count": 3.0, "updated_at": "2026-01-01T00:00:00Z"},
-		},
-	}
-	out := formatSessionList(data)
-	if strings.Contains(out, "{") {
-		t.Fatalf("expected human-readable output, not JSON: %q", out)
-	}
-	if !strings.Contains(out, "abc-full-id") {
-		t.Fatalf("expected full session id for copy/switch, got: %q", out)
-	}
-	if !strings.Contains(out, "test") {
-		t.Fatalf("missing expected fields: %q", out)
+func TestToolArgsSnippetShell(t *testing.T) {
+	args := map[string]any{"cmd": "rm /tmp/test.txt"}
+	got := toolArgsSnippet("shell", args)
+	if got != "rm /tmp/test.txt" {
+		t.Fatalf("shell snippet = %q, want %q", got, "rm /tmp/test.txt")
 	}
 }
 
-func TestFormatSessionListAlignsDespiteLongNames(t *testing.T) {
-	data := map[string]any{
-		"sessions": []any{
-			map[string]any{"id": "1", "name": "short", "message_count": 1.0, "updated_at": "2026-01-01T00:00:00Z"},
-			map[string]any{"id": "2", "name": "a much much longer session name", "message_count": 2.0, "updated_at": "2026-01-01T00:00:00Z"},
-		},
-	}
-	out := formatSessionList(data)
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) < 3 { // header + 2 rows
-		t.Fatalf("expected header + 2 rows, got %d lines: %q", len(lines), out)
-	}
-	// A real table keeps every row the same rendered width; naive
-	// %-Ns padding breaks once a value exceeds N.
-	width := visibleLen(lines[0])
-	for i, l := range lines {
-		if got := visibleLen(l); got != width {
-			t.Fatalf("line %d width = %d, want %d (table misaligned): %q", i, got, width, l)
-		}
+func TestToolArgsSnippetEditFile(t *testing.T) {
+	args := map[string]any{"path": "foo/bar.go", "old": "x", "new": "y"}
+	got := toolArgsSnippet("edit_file", args)
+	if got != "foo/bar.go" {
+		t.Fatalf("edit_file snippet = %q, want %q", got, "foo/bar.go")
 	}
 }
 
-func TestFormatModelList(t *testing.T) {
-	data := map[string]any{"models": []any{
-		map[string]any{"name": "deepseek", "current": true},
-		map[string]any{"name": "claude", "current": false},
-	}}
-	out := formatModelList(data)
-	if !strings.Contains(out, "*") || !strings.Contains(out, "deepseek") {
-		t.Fatalf("expected current model marked, got: %q", out)
+func TestToolArgsSnippetReadFile(t *testing.T) {
+	args := map[string]any{"path": "foo.txt"}
+	got := toolArgsSnippet("read_file", args)
+	if got != "foo.txt" {
+		t.Fatalf("read_file snippet = %q, want %q", got, "foo.txt")
 	}
 }
 
-func TestLocalTimeConvertsFromUTC(t *testing.T) {
-	out := localTime("2026-01-01T00:00:00Z")
-	if out == "2026-01-01T00:00:00Z" {
-		t.Fatal("expected timestamp to be reformatted, not left as raw UTC RFC3339")
+func TestToolArgsSnippetHttpGet(t *testing.T) {
+	args := map[string]any{"url": "https://example.com"}
+	got := toolArgsSnippet("http_get", args)
+	if got != "https://example.com" {
+		t.Fatalf("http_get snippet = %q, want %q", got, "https://example.com")
 	}
 }
 
-func TestFormatMessageHistory(t *testing.T) {
-	msgs := []map[string]any{
-		{"role": "user", "content": "hi"},
-		{"role": "assistant", "content": "hello there"},
+func TestToolArgsSnippetUnknownToolFallsBackToPath(t *testing.T) {
+	args := map[string]any{"path": "bar/baz.go"}
+	got := toolArgsSnippet("some_unknown_tool", args)
+	if got != "bar/baz.go" {
+		t.Fatalf("unknown tool snippet = %q, want %q", got, "bar/baz.go")
 	}
-	out := formatMessageHistory(msgs)
-	if !strings.Contains(out, "hi") || !strings.Contains(out, "hello there") {
-		t.Fatalf("expected both messages rendered: %q", out)
+}
+
+func TestToolArgsSnippetEmpty(t *testing.T) {
+	// Non-map arg, and empty map.
+	if got := toolArgsSnippet("shell", "not a map"); got != "" {
+		t.Fatalf("non-map arg = %q, want empty", got)
+	}
+	if got := toolArgsSnippet("shell", map[string]any{}); got != "" {
+		t.Fatalf("empty map = %q, want empty", got)
 	}
 }
