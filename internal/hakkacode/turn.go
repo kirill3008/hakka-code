@@ -23,6 +23,11 @@ type turnState struct {
 	toolStartTimes map[string]time.Time
 	sawTool        bool
 	stream         *streamingText // nil when no deltas have arrived yet
+
+	// lazy, when true, skips markdown rendering during addDelta and
+	// defers it to streamFinalize. Used for history replay during boot
+	// where per-delta rendering is wasted (viewport isn't shown yet).
+	lazy bool
 }
 
 // streamingText tracks the in-progress assistant prose as deltas arrive.
@@ -41,6 +46,14 @@ func newTurnState() *turnState {
 	}
 }
 
+// newLazyTurnState initialises a turn that defers markdown rendering to
+// the end — used for history replay during boot.
+func newLazyTurnState() *turnState {
+	ts := newTurnState()
+	ts.lazy = true
+	return ts
+}
+
 // active reports whether a turn is in flight.
 func (ts *turnState) active() bool { return ts != nil }
 
@@ -54,48 +67,66 @@ func (ts *turnState) streaming() bool { return ts.stream != nil }
 // appendFn is called only for the first delta (to insert a new entry).
 // updateFn is called for every delta after the first to refresh the
 // viewport content.
+//
+// In lazy mode (history replay), markdown rendering is skipped entirely
+// during addDelta and deferred to streamFinalize so the O(n²) cost of
+// re-rendering the full accumulated text on every delta is avoided.
 func (ts *turnState) addDelta(
 	text string,
 	appendFn func(e *transcript.TranscriptEntry),
 	updateFn func(entry *transcript.TranscriptEntry, lines []string),
 ) {
 	if ts.stream == nil {
-		// If we previously output a tool call, add a spacer before the
-		// new prose block to visually separate tool results from text.
 		if ts.sawTool {
 			appendFn(&transcript.TranscriptEntry{Type: transcript.EntrySpacer, Raw: ""})
 		}
 
-		// First delta: create the entry with markdown rendering.
 		ts.stream = &streamingText{}
 		ts.stream.rawBuf.WriteString(text)
+
+		var rendered []string
+		if ts.lazy {
+			rendered = strings.Split(text, "\n")
+		} else {
+			rendered = renderStreaming(text)
+		}
+
 		entry := &transcript.TranscriptEntry{
 			Type:     transcript.EntryAssistantText,
 			Raw:      text,
-			Rendered: renderStreaming(text),
+			Rendered: rendered,
 		}
 		ts.stream.entry = entry
 		appendFn(entry)
 	} else {
-		// Subsequent delta: grow in-place, re-render as markdown.
 		ts.stream.rawBuf.WriteString(text)
 		full := ts.stream.rawBuf.String()
 		entry := ts.stream.entry
 		entry.Raw = full
-		entry.Rendered = renderStreaming(full)
+
+		if ts.lazy {
+			entry.Rendered = strings.Split(full, "\n")
+		} else {
+			entry.Rendered = renderStreaming(full)
+		}
 		updateFn(entry, entry.Rendered)
 	}
 }
 
-// streamFinalize clears the streaming state. The last addDelta call
-// already rendered the full accumulated text as markdown, so no
-// re-render is needed — we just drop the stream reference so the next
-// delta (after a tool call, or in a new turn) starts fresh.
+// streamFinalize renders the accumulated text as markdown if lazy mode
+// was used, then clears the streaming state.
 func (ts *turnState) streamFinalize(
-	_ func(entry *transcript.TranscriptEntry, lines []string),
+	updateFn func(entry *transcript.TranscriptEntry, lines []string),
 ) {
 	if ts.stream == nil {
 		return
+	}
+	if ts.lazy {
+		raw := strings.TrimRight(ts.stream.rawBuf.String(), "\n") + "\n"
+		entry := ts.stream.entry
+		entry.Raw = strings.TrimRight(raw, "\n")
+		entry.Rendered = renderStreaming(raw)
+		updateFn(entry, entry.Rendered)
 	}
 	ts.stream = nil
 }

@@ -345,7 +345,7 @@ func (m model) handleBoot(msg bootMsg) model {
 	// A temporary turnState is injected so handleFrame's tool/delta/done
 	// handling has a place to accumulate state — just like a live turn.
 	if len(msg.events) > 0 {
-		m.turn = newTurnState()
+		m.turn = newLazyTurnState()
 		for _, evt := range msg.events {
 			frame := eventToResponseFrame(evt)
 			mdl, _ := m.handleFrame(frame)
