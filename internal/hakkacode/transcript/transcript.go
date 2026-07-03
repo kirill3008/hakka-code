@@ -76,6 +76,27 @@ func (t *Transcript) Append(entry *TranscriptEntry) {
 	t.lineCount += n
 }
 
+// UpdateLastRendered replaces the last entry's Rendered slice and adjusts
+// lineCount by the delta. The entry must have been previously appended via
+// Append. This is used for in-place streaming updates where the content of
+// the last entry grows without creating a new entry.
+func (t *Transcript) UpdateLastRendered(rendered []string) {
+	if len(t.entries) == 0 {
+		return
+	}
+	last := t.entries[len(t.entries)-1]
+	oldN := len(last.Rendered)
+	if oldN == 0 {
+		oldN = 1
+	}
+	last.Rendered = rendered
+	newN := len(rendered)
+	if newN == 0 {
+		newN = 1
+	}
+	t.lineCount += newN - oldN
+}
+
 // ToggleEntry toggles the collapsed state of the entry at the given index.
 // Returns true if the entry was toggled and a rebuild is required.
 func (t *Transcript) ToggleEntry(idx int) bool {

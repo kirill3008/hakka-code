@@ -22,8 +22,15 @@ type turnState struct {
 	toolStarts     map[string]protocol.ResponseFrame
 	toolStartTimes map[string]time.Time
 	sawTool        bool
-	assistantBuf   strings.Builder
-	flushedText    bool
+	stream         *streamingText // nil when no deltas have arrived yet
+}
+
+// streamingText tracks the in-progress assistant prose as deltas arrive.
+// Deltas are shown immediately as plain text (no markdown rendering until
+// the stream is finalised) by mutating the last transcript entry in-place.
+type streamingText struct {
+	rawBuf strings.Builder
+	entry  *transcript.TranscriptEntry // pointer into transcript.entries slice
 }
 
 // newTurnState initialises an empty turn.
@@ -37,9 +44,84 @@ func newTurnState() *turnState {
 // active reports whether a turn is in flight.
 func (ts *turnState) active() bool { return ts != nil }
 
-// addDelta appends a text delta chunk to the assistant buffer.
-func (ts *turnState) addDelta(text string) {
-	ts.assistantBuf.WriteString(text)
+// streaming reports whether deltas have started arriving.
+func (ts *turnState) streaming() bool { return ts.stream != nil }
+
+// addDelta appends a text delta chunk. The first delta creates a new
+// transcript entry; subsequent deltas mutate it in-place so the viewport
+// updates immediately without creating duplicate entries.
+//
+// appendFn is called only for the first delta (to insert a new entry).
+// updateFn is called for every delta after the first to refresh the
+// viewport content.
+func (ts *turnState) addDelta(
+	text string,
+	appendFn func(e *transcript.TranscriptEntry),
+	updateFn func(entry *transcript.TranscriptEntry, lines []string),
+) {
+	if ts.stream == nil {
+		// If we previously output a tool call, add a spacer before the
+		// new prose block to visually separate tool results from text.
+		if ts.sawTool {
+			appendFn(&transcript.TranscriptEntry{Type: transcript.EntrySpacer, Raw: ""})
+		}
+
+		// First delta: create the entry with markdown rendering.
+		ts.stream = &streamingText{}
+		ts.stream.rawBuf.WriteString(text)
+		entry := &transcript.TranscriptEntry{
+			Type:     transcript.EntryAssistantText,
+			Raw:      text,
+			Rendered: renderStreaming(text),
+		}
+		ts.stream.entry = entry
+		appendFn(entry)
+	} else {
+		// Subsequent delta: grow in-place, re-render as markdown.
+		ts.stream.rawBuf.WriteString(text)
+		full := ts.stream.rawBuf.String()
+		entry := ts.stream.entry
+		entry.Raw = full
+		entry.Rendered = renderStreaming(full)
+		updateFn(entry, entry.Rendered)
+	}
+}
+
+// streamFinalize clears the streaming state. The last addDelta call
+// already rendered the full accumulated text as markdown, so no
+// re-render is needed — we just drop the stream reference so the next
+// delta (after a tool call, or in a new turn) starts fresh.
+func (ts *turnState) streamFinalize(
+	_ func(entry *transcript.TranscriptEntry, lines []string),
+) {
+	if ts.stream == nil {
+		return
+	}
+	ts.stream = nil
+}
+
+// streamFinalizeOrAppend handles the done frame. If deltas were streamed,
+// it finalises the streaming entry as markdown. If no deltas arrived but
+// the done frame carries text (e.g. cached/historical turn), it appends
+// the text as a new entry.
+func (ts *turnState) streamFinalizeOrAppend(
+	doneText string,
+	appendFn func(e *transcript.TranscriptEntry),
+	updateFn func(entry *transcript.TranscriptEntry, lines []string),
+) {
+	if ts.stream != nil {
+		// Streamed path: polish the in-progress entry.
+		ts.streamFinalize(updateFn)
+	} else if doneText != "" {
+		// Non-streamed path: full text arrived in the done frame.
+		if ts.sawTool {
+			appendFn(&transcript.TranscriptEntry{Type: transcript.EntrySpacer, Raw: ""})
+		}
+		appendFn(&transcript.TranscriptEntry{
+			Type: transcript.EntryAssistantText,
+			Raw:  strings.TrimRight(renderMarkdown(doneText), "\n") + "\n",
+		})
+	}
 }
 
 // recordToolStart remembers the start frame and wall-clock time for a
@@ -80,45 +162,6 @@ func (ts *turnState) runningCount() int { return len(ts.toolStarts) }
 // toolsLabel returns a spinner label describing the currently running tools.
 func (ts *turnState) toolsLabel() string {
 	return toolsLabel(ts.toolStarts)
-}
-
-// flushAssistant returns any accumulated assistant delta text as a
-// transcript entry, adding a spacer if we previously output tool calls.
-// The internal buffer is cleared.
-func (ts *turnState) flushAssistant(appendFn func(e *transcript.TranscriptEntry)) {
-	if ts.assistantBuf.Len() == 0 {
-		return
-	}
-	if ts.sawTool {
-		appendFn(&transcript.TranscriptEntry{Type: transcript.EntrySpacer, Raw: ""})
-	}
-	appendFn(&transcript.TranscriptEntry{
-		Type: transcript.EntryAssistantText,
-		Raw:  strings.TrimRight(renderMarkdown(ts.assistantBuf.String()), "\n") + "\n",
-	})
-	ts.assistantBuf.Reset()
-	ts.flushedText = true
-}
-
-// appendRemainingText flushes any remaining delta buffer if no deltas
-// were rendered (e.g. a cached/historical turn where full text arrived
-// in the done frame).
-func (ts *turnState) appendRemainingText(text string, appendFn func(e *transcript.TranscriptEntry)) {
-	if ts.flushedText {
-		return
-	}
-	if text == "" {
-		return
-	}
-	if ts.sawTool {
-		appendFn(&transcript.TranscriptEntry{Type: transcript.EntrySpacer, Raw: ""})
-	}
-	appendFn(&transcript.TranscriptEntry{
-		Type: transcript.EntryAssistantText,
-		Raw:  strings.TrimRight(renderMarkdown(text), "\n") + "\n",
-	})
-	ts.assistantBuf.Reset()
-	ts.flushedText = true
 }
 
 // appendToolCall creates and appends a tool call transcript entry.

@@ -17,6 +17,24 @@ import (
 // garbage like "]11;rgb:..." into whatever's focused).
 var isDarkBackground = sync.OnceValue(termenv.HasDarkBackground)
 
+// cachedRenderer holds a lazily-created glamour TermRenderer so streaming
+// deltas don't allocate a new goldmark parser on every call.
+var (
+	cachedRendererOnce sync.Once
+	cachedRendererInst *glamour.TermRenderer
+	cachedRendererErr  error
+)
+
+func getRenderer() (*glamour.TermRenderer, error) {
+	cachedRendererOnce.Do(func() {
+		cachedRendererInst, cachedRendererErr = glamour.NewTermRenderer(
+			glamour.WithStyles(headingFixedStyle()),
+			glamour.WithWordWrap(terminalWidth()),
+		)
+	})
+	return cachedRendererInst, cachedRendererErr
+}
+
 // detectTerminalTheme must run before tea.Program starts — see
 // isDarkBackground.
 func detectTerminalTheme() {
@@ -44,18 +62,26 @@ func renderMarkdown(text string) string {
 	return b.String()
 }
 
-// renderProse renders non-code, non-table markdown text via glamour, using
-// a heading style patched to drop the literal "#" prefixes that glamour's
-// built-in styles print for h2-h6 (h1 already renders as a colored block
-// with no "#").
+// renderStreaming calls renderMarkdown and splits the result into lines
+// for the transcript entry's Rendered slice. Trailing empty lines from
+// markdown rendering are collapsed.
+func renderStreaming(text string) []string {
+	s := renderMarkdown(text)
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return []string{""}
+	}
+	return strings.Split(s, "\n")
+}
+
+// renderProse renders non-code, non-table markdown text via the cached
+// glamour renderer, using a heading style patched to drop the literal "#"
+// prefixes that glamour's built-in styles print for h2-h6.
 func renderProse(text string) string {
 	if strings.TrimSpace(text) == "" {
 		return text
 	}
-	r, err := glamour.NewTermRenderer(
-		glamour.WithStyles(headingFixedStyle()),
-		glamour.WithWordWrap(terminalWidth()),
-	)
+	r, err := getRenderer()
 	if err != nil {
 		return text
 	}

@@ -414,7 +414,7 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 	case protocol.TypeDelta:
 		m.spinner.setLabel("Writing response")
 		if frame.Text != "" && m.turn.active() {
-			m.turn.addDelta(frame.Text)
+			m.turn.addDelta(frame.Text, m.appendEntry, m.updateStreamingEntry)
 		}
 	case protocol.TypeTool:
 		if !m.turn.active() {
@@ -425,8 +425,8 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 			m.turn.recordToolStart(frame)
 			m.spinner.setLabel(m.turn.toolsLabel())
 		} else {
-			// Flush any assistant text that arrived before this tool result.
-			m.turn.flushAssistant(m.appendEntry)
+			// Finalise any streaming prose as markdown before the tool call.
+			m.turn.streamFinalize(m.updateStreamingEntry)
 
 			startFrame := m.turn.finishTool(frame.ID)
 
@@ -437,10 +437,7 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 		}
 	case protocol.TypeUsage:
 	case protocol.TypeDone:
-		m.turn.flushAssistant(m.appendEntry)
-		if frame.Text != "" {
-			m.turn.appendRemainingText(frame.Text, m.appendEntry)
-		}
+		m.turn.streamFinalizeOrAppend(frame.Text, m.appendEntry, m.updateStreamingEntry)
 		if frame.Error != "" {
 			m.appendError("error: " + frame.Error)
 		} else if frame.Cancelled {

@@ -95,3 +95,17 @@ func (m *model) entryRenderer(entry *transcript.TranscriptEntry, width int) []st
 func (m *model) viewportContent() string {
 	return m.transcriptEntries.String()
 }
+
+// updateStreamingEntry replaces the last transcript entry's rendered lines
+// in-place and refreshes the viewport — used by turnState during streaming.
+func (m *model) updateStreamingEntry(entry *transcript.TranscriptEntry, lines []string) {
+	if !m.ready {
+		return
+	}
+	stick := m.viewport.AtBottom()
+	m.transcriptEntries.UpdateLastRendered(lines)
+	m.viewport.SetContent(m.transcriptEntries.String())
+	if stick {
+		m.viewport.GotoBottom()
+	}
+}
