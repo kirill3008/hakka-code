@@ -3,50 +3,76 @@ package hakkacode
 import "testing"
 
 func TestHistoryUpDown(t *testing.T) {
-	m := newModel(nil, Config{}, nil)
-	m.history = []string{"first", "second", "third"}
-	m.historyIdx = len(m.history)
+	w := newInputWidget(nil)
+	w.history = []string{"first", "second", "third"}
+	w.historyIdx = len(w.history)
 
-	m = m.historyUp()
-	if got := m.input.Value(); got != "third" {
-		t.Fatalf("historyUp #1 = %q, want %q", got, "third")
+	ok := w.HistoryUp()
+	if !ok {
+		t.Fatal("HistoryUp #1 returned false")
 	}
-	m = m.historyUp()
-	if got := m.input.Value(); got != "second" {
-		t.Fatalf("historyUp #2 = %q, want %q", got, "second")
+	if got := w.Value(); got != "third" {
+		t.Fatalf("HistoryUp #1 = %q, want %q", got, "third")
 	}
-	m = m.historyDown()
-	if got := m.input.Value(); got != "third" {
-		t.Fatalf("historyDown #1 = %q, want %q", got, "third")
+
+	ok = w.HistoryUp()
+	if !ok {
+		t.Fatal("HistoryUp #2 returned false")
 	}
-	m = m.historyDown()
-	if got := m.input.Value(); got != "" {
-		t.Fatalf("historyDown past newest = %q, want empty draft", got)
+	if got := w.Value(); got != "second" {
+		t.Fatalf("HistoryUp #2 = %q, want %q", got, "second")
+	}
+
+	ok = w.HistoryDown()
+	if !ok {
+		t.Fatal("HistoryDown #1 returned false")
+	}
+	if got := w.Value(); got != "third" {
+		t.Fatalf("HistoryDown #1 = %q, want %q", got, "third")
+	}
+
+	ok = w.HistoryDown()
+	if !ok {
+		t.Fatal("HistoryDown #2 returned false")
+	}
+	if got := w.Value(); got != "" {
+		t.Fatalf("HistoryDown past newest = %q, want empty draft", got)
 	}
 }
 
 func TestHistoryUpAtStartIsNoop(t *testing.T) {
-	m := newModel(nil, Config{}, nil)
-	m.history = []string{"only"}
-	m.historyIdx = 0
-	m = m.historyUp()
-	if got := m.input.Value(); got != "" {
-		t.Fatalf("expected no-op at oldest entry, got %q", got)
+	w := newInputWidget(nil)
+	w.history = []string{"only"}
+	w.historyIdx = 0
+
+	ok := w.HistoryUp()
+	if ok {
+		t.Fatal("expected no-op at oldest entry")
+	}
+	if got := w.Value(); got != "" {
+		t.Fatalf("expected empty, got %q", got)
 	}
 }
 
 func TestHistoryPreservesDraft(t *testing.T) {
-	m := newModel(nil, Config{}, nil)
-	m.history = []string{"old"}
-	m.historyIdx = len(m.history)
-	m.input.SetValue("unsent draft")
+	w := newInputWidget(nil)
+	w.history = []string{"old"}
+	w.historyIdx = len(w.history)
+	w.area.SetValue("unsent draft")
 
-	m = m.historyUp()
-	if got := m.input.Value(); got != "old" {
-		t.Fatalf("historyUp = %q, want %q", got, "old")
+	ok := w.HistoryUp()
+	if !ok {
+		t.Fatal("HistoryUp returned false")
 	}
-	m = m.historyDown()
-	if got := m.input.Value(); got != "unsent draft" {
-		t.Fatalf("historyDown should restore draft, got %q", got)
+	if got := w.Value(); got != "old" {
+		t.Fatalf("HistoryUp = %q, want %q", got, "old")
+	}
+
+	ok = w.HistoryDown()
+	if !ok {
+		t.Fatal("HistoryDown returned false")
+	}
+	if got := w.Value(); got != "unsent draft" {
+		t.Fatalf("HistoryDown should restore draft, got %q", got)
 	}
 }

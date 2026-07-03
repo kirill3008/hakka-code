@@ -2,12 +2,9 @@ package hakkacode
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
-	"unicode/utf8"
 
 	"github.com/atotto/clipboard"
 
@@ -15,15 +12,9 @@ import (
 	"hakka-code/internal/hakkacode/protocol"
 	"hakka-code/internal/hakkacode/transcript"
 
-	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
-
-// inputMaxLines caps how tall the input box is allowed to grow before it
-// starts scrolling internally instead.
-const inputMaxLines = 6
 
 // inputBorderColor matches the table border's green so bordered UI chrome
 // reads as one consistent accent color.
@@ -105,65 +96,37 @@ type model struct {
 	sessionName string
 
 	viewport viewport.Model
-	input    textarea.Model
+	input    inputWidget
+	spinner  spinnerWidget
 	ready    bool
 	width    int
 	height   int
 
-	turnActive     bool
-	toolStarts     map[string]protocol.ResponseFrame
-	sawTool        bool
-	assistantBuf   string // accumulated delta text flushed before tool calls
-	flushedText    bool   // true if we already output assistant text from deltas
-	spinIdx        int
-	spinLabel      string
-	spinStart      time.Time
+	// turn is non-nil only while a turn is in flight.
+	turn *turnState
 
 	transcriptEntries *transcript.Transcript
 	selection         *transcript.Selection
 
 	fatalErr error
-
-	history      []string
-	historyIdx   int // == len(history) means "on the live draft, not browsing"
-	historyDraft string
 }
 
 func newModel(ctx context.Context, cfg Config, client backend.Backend) model {
-	ta := textarea.New()
-	ta.Prompt = "❯ "
-	ta.Placeholder = "Type a message, or /help for commands"
-	ta.CharLimit = 0
-	ta.ShowLineNumbers = false
-	ta.MaxHeight = inputMaxLines
-	ta.SetHeight(1)
-	ta.SetPromptFunc(2, func(lineIdx int) string {
-		if lineIdx == 0 {
-			return "❯ "
-		}
-		return "  "
-	})
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
-	ta.KeyMap.InsertNewline.SetEnabled(false)
-
-	return model{
+	// We need a mutable reference to model to wire the viewport-height
+	// callback. Use a closure capture pattern.
+	m := model{
 		ctx:               ctx,
 		cfg:               cfg,
 		client:            client,
-		input:             ta,
-		toolStarts:        map[string]protocol.ResponseFrame{},
 		transcriptEntries: transcript.New(),
 		selection:         transcript.NewSelection(),
 	}
+	m.input = newInputWidget(func() { m.recomputeViewportHeight() })
+	return m
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(bootCmd(m.ctx, m.client, m.cfg), textarea.Blink)
-}
-
-func spinTick() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} })
+	return tea.Batch(bootCmd(m.ctx, m.client, m.cfg), m.input.Blink())
 }
 
 // --- Update ---
@@ -180,7 +143,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 
 	case bootMsg:
-		return m.handleBoot(msg), textarea.Blink
+		return m.handleBoot(msg), m.input.Blink()
 
 	case frameMsg:
 		return m.handleFrame(protocol.ResponseFrame(msg))
@@ -203,10 +166,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCopyToClipboard(msg)
 
 	case spinTickMsg:
-		if !m.turnActive {
+		if !m.turn.active() {
 			return m, nil
 		}
-		m.spinIdx++
+		m.spinner.tick()
 		return m, spinTick()
 	}
 	return m, nil
@@ -215,7 +178,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleResize(msg tea.WindowSizeMsg) model {
 	m.width = msg.Width
 	m.height = msg.Height
-	m.input.SetWidth(msg.Width - 3)
+	m.input.SetWidth(msg.Width)
 	if !m.ready {
 		m.viewport = viewport.New(msg.Width, 1)
 		m.viewport.SetContent(m.transcriptEntries.String())
@@ -244,8 +207,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.Type {
 	case tea.KeyCtrlC:
-		if m.turnActive {
-			m.spinLabel = "Cancelling"
+		if m.turn.active() {
+			m.spinner.setLabel("Cancelling")
 			return m, cancelTurnCmd(m.ctx, m.client, m.sessionID)
 		}
 		return m, tea.Quit
@@ -258,128 +221,34 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyEnter:
-		if m.turnActive {
+		if m.turn.active() {
 			return m, nil
 		}
 		return m.submit()
 
 	case tea.KeyUp:
 		if m.input.Value() == "" {
-			return m.historyUp(), nil
+			m.input.HistoryUp()
+			return m, nil
 		}
 	case tea.KeyDown:
 		if m.input.Value() == "" {
-			return m.historyDown(), nil
+			m.input.HistoryDown()
+			return m, nil
 		}
 	}
 
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
-	m.resizeInputToFit()
-	return m, cmd
-}
-
-// resizeInputToFit computes the visual line count of the input content
-// and sets the textarea height accordingly (clamped to inputMaxLines).
-// It also fixes the textarea's scroll offset which can drift on resize.
-func (m *model) flushAssistantBuf() {
-	if m.assistantBuf == "" {
-		return
-	}
-	// Add a spacer before assistant text if we've already output tool
-	// calls — visually separates tool results from the next prose block.
-	if m.sawTool {
-		m.appendEntry(&transcript.TranscriptEntry{Type: transcript.EntrySpacer, Raw: ""})
-	}
-	m.appendAssistantText(m.assistantBuf)
-	m.assistantBuf = ""
-	m.flushedText = true
-}
-
-func (m *model) resizeInputToFit() {
-	needed := m.inputVisualLines()
-	if needed < 1 {
-		needed = 1
-	}
-	if needed > inputMaxLines {
-		needed = inputMaxLines
-	}
-	if needed != m.input.Height() {
-		m.input.SetHeight(needed)
-		m.recomputeViewportHeight()
-	}
-}
-
-// inputVisualLines counts how many visual (wrapped) rows the current
-// input content occupies, including prompt columns. This is more
-// reliable than LineInfo().Height which only covers the cursor's line.
-func (m *model) inputVisualLines() int {
-	content := m.input.Value()
-	// The textarea width minus 2 accounts for prompt padding columns.
-	avail := m.input.Width() - 2
-	if avail < 10 {
-		avail = 80
-	}
-	lines := strings.Split(content, "\n")
-	total := 0
-	for _, line := range lines {
-		// Empty line still occupies one row.
-		runeLen := utf8.RuneCountInString(line)
-		if runeLen == 0 {
-			total++
-			continue
-		}
-		// Each full width worth of runes wraps to another visual row.
-		wrapped := (runeLen + avail - 1) / avail
-		if wrapped < 1 {
-			wrapped = 1
-		}
-		total += wrapped
-	}
-	if total < 1 {
-		total = 1
-	}
-	return total
-}
-
-func (m model) historyUp() model {
-	if len(m.history) == 0 || m.historyIdx == 0 {
-		return m
-	}
-	if m.historyIdx == len(m.history) {
-		m.historyDraft = m.input.Value()
-	}
-	m.historyIdx--
-	m.input.SetValue(m.history[m.historyIdx])
-	m.resizeInputToFit()
-	return m
-}
-
-func (m model) historyDown() model {
-	if m.historyIdx >= len(m.history) {
-		return m
-	}
-	m.historyIdx++
-	if m.historyIdx == len(m.history) {
-		m.input.SetValue(m.historyDraft)
-	} else {
-		m.input.SetValue(m.history[m.historyIdx])
-	}
-	m.resizeInputToFit()
-	return m
+	return m, m.input.Update(msg)
 }
 
 func (m model) submit() (tea.Model, tea.Cmd) {
 	line := strings.TrimSpace(m.input.Value())
 	m.input.Reset()
-	m.input.SetHeight(1)
 	m.recomputeViewportHeight()
 	if line == "" {
 		return m, nil
 	}
-	m.history = append(m.history, line)
-	m.historyIdx = len(m.history)
-	m.historyDraft = ""
+	m.input.PushHistory(line)
 
 	sc, isSlash, err := ParseSlashCommand(line)
 	if err != nil {
@@ -395,14 +264,8 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	m.appendUserPrompt(line)
-	m.turnActive = true
-	m.toolStarts = map[string]protocol.ResponseFrame{}
-	m.sawTool = false
-	m.assistantBuf = ""
-	m.flushedText = false
-	m.spinIdx = 0
-	m.spinLabel = "Thinking"
-	m.spinStart = time.Now()
+	m.turn = newTurnState()
+	m.spinner.start("Thinking")
 	return m, tea.Batch(waitFrame(m.ctx, m.client), spinTick())
 }
 
@@ -414,8 +277,8 @@ func (m model) handleSlash(sc *SlashCommand) (tea.Model, tea.Cmd) {
 	case "exit":
 		return m, tea.Quit
 	case "cancel":
-		if m.turnActive {
-			m.spinLabel = "Cancelling"
+		if m.turn.active() {
+			m.spinner.setLabel("Cancelling")
 		}
 		return m, cancelTurnCmd(m.ctx, m.client, m.sessionID)
 	case "clear":
@@ -478,14 +341,17 @@ func (m model) handleBoot(msg bootMsg) model {
 	// turns — each event is converted to a ResponseFrame and processed
 	// by handleFrame. This ensures tool rendering is identical to live
 	// chat, with args/snippet from the server driving the display.
-	// NOTE: return cmds (waitFrame, autoRenameCmd) are ignored during
-	// replay since this runs inside the boot handler synchronously.
+	//
+	// A temporary turnState is injected so handleFrame's tool/delta/done
+	// handling has a place to accumulate state — just like a live turn.
 	if len(msg.events) > 0 {
+		m.turn = newTurnState()
 		for _, evt := range msg.events {
 			frame := eventToResponseFrame(evt)
 			mdl, _ := m.handleFrame(frame)
 			m = mdl.(model)
 		}
+		m.turn = nil
 	}
 	return m
 }
@@ -512,13 +378,12 @@ func (m model) handleCmdResult(msg cmdResultMsg) model {
 	// list entry if one exists, so the scrollback doesn't accumulate
 	// duplicate lists.
 	if msg.cmd == "tool_list" || msg.cmd == "model_list" || msg.cmd == "session_list" {
-		// Pop the last command result + the spacer before it.
 		last := m.transcriptEntries.LastEntry()
 		if last != nil && last.Type == transcript.EntryCommandResult {
-			m.transcriptEntries.Pop() // the list result
+			m.transcriptEntries.Pop()
 			spacer := m.transcriptEntries.LastEntry()
 			if spacer != nil && spacer.Type == transcript.EntrySpacer {
-				m.transcriptEntries.Pop() // the spacer before it
+				m.transcriptEntries.Pop()
 			}
 		}
 	}
@@ -547,54 +412,34 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 			m.appendUserPrompt(frame.Text)
 		}
 	case protocol.TypeDelta:
-		m.spinLabel = "Writing response"
-		if frame.Text != "" {
-			m.assistantBuf += frame.Text
+		m.spinner.setLabel("Writing response")
+		if frame.Text != "" && m.turn.active() {
+			m.turn.addDelta(frame.Text)
 		}
 	case protocol.TypeTool:
-		m.sawTool = true
+		if !m.turn.active() {
+			break
+		}
+		m.turn.sawTool = true
 		if frame.Status == protocol.StatusStart {
-			if frame.ID != "" {
-				m.toolStarts[frame.ID] = frame
-			}
-			m.spinLabel = toolsLabel(m.toolStarts)
+			m.turn.recordToolStart(frame)
+			m.spinner.setLabel(m.turn.toolsLabel())
 		} else {
 			// Flush any assistant text that arrived before this tool result.
-			m.flushAssistantBuf()
+			m.turn.flushAssistant(m.appendEntry)
 
-			var startFrame *protocol.ResponseFrame
-			if s, ok := m.toolStarts[frame.ID]; ok {
-				startFrame = &s
-			}
-			delete(m.toolStarts, frame.ID)
+			startFrame := m.turn.finishTool(frame.ID)
 
-			out := renderToolEvent(startFrame, frame)
-			if out != "" {
-				status := transcript.ToolOK
-				if frame.Status == protocol.StatusErr {
-					status = transcript.ToolErr
-				}
-				var snippet string
-				var args json.RawMessage
-				if startFrame != nil {
-					snippet = toolSnippet(*startFrame)
-					args = startFrame.Args
-				}
-				m.appendToolCall(toolNameFromFrame(frame), frame.ID, status, args, snippet, frame.Error)
+			if out := renderToolEvent(startFrame, frame); out != "" {
+				m.turn.appendToolCall(m.appendEntry, frame, startFrame)
 			}
-			m.spinLabel = toolsLabel(m.toolStarts)
+			m.spinner.setLabel(m.turn.toolsLabel())
 		}
 	case protocol.TypeUsage:
 	case protocol.TypeDone:
-		m.turnActive = false
-		m.flushAssistantBuf()
-		if frame.Text != "" && !m.flushedText {
-			// No delta-rendered text — the full text arrived in the
-			// done frame itself (e.g. cached/historical turn replay).
-			if m.sawTool {
-				m.appendEntry(&transcript.TranscriptEntry{Type: transcript.EntrySpacer, Raw: ""})
-			}
-			m.appendAssistantText(frame.Text)
+		m.turn.flushAssistant(m.appendEntry)
+		if frame.Text != "" {
+			m.turn.appendRemainingText(frame.Text, m.appendEntry)
 		}
 		if frame.Error != "" {
 			m.appendError("error: " + frame.Error)
@@ -604,6 +449,7 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 		if s := renderStatusline(frame.Stats); s != "" {
 			m.appendStatusLine(s)
 		}
+		m.turn = nil
 		var cmd tea.Cmd
 		if m.sessionName == "" {
 			cmd = autoRenameCmd(m.ctx, m.client, m.sessionID)
@@ -632,44 +478,31 @@ func (m model) View() string {
 	}
 
 	var status string
-	if m.turnActive {
-		frame := spinnerFrames[m.spinIdx%len(spinnerFrames)]
-		elapsed := time.Since(m.spinStart)
-		status = dimf("%s %s (%s)", frame, m.spinLabel, formatDuration(elapsed))
+	if m.turn.active() {
+		status = m.spinner.view()
 	} else {
 		status = dim("ready")
 	}
 
-	inputBox := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color(inputBorderColor)).
-		Render(m.input.View())
-
-	return vpContent + "\n\n" + status + "\n" + inputBox
+	return vpContent + "\n\n" + status + "\n" + m.input.View()
 }
 
 // applySelectionToViewport applies the selection highlight to the
 // viewport's visible portion. It maps the selection's absolute
 // transcript coordinates into the viewport's visible window, then
 // applies reverse-video highlighting only to lines that fall within
-// the visible range. This avoids the layout mismatch that occurred
-// when View() had two separate rendering paths.
+// the visible range.
 func applySelectionToViewport(vpContent string, sel *transcript.Selection, yOffset int) string {
-	// Split into lines, preserving the trailing newline from viewport.
 	rawLines := strings.Split(vpContent, "\n")
-	// viewport.View() always appends a trailing newline which
-	// Split turns into an empty "" at the end. Preserve it.
 	hasTrailingNewline := vpContent != "" && vpContent[len(vpContent)-1] == '\n'
 
 	sl, sc, el, ec := sel.Normalized()
 
-	// Map absolute coordinates into visible-window-relative.
 	relStart := sl - yOffset
 	relEnd := el - yOffset
 
 	var result []string
 	for i, line := range rawLines {
-		// The trailing empty element from Split("\n") passes through untouched.
 		if i == len(rawLines)-1 && hasTrailingNewline && line == "" {
 			result = append(result, "")
 			continue
@@ -678,121 +511,15 @@ func applySelectionToViewport(vpContent string, sel *transcript.Selection, yOffs
 		if i < relStart || i > relEnd {
 			result = append(result, line)
 		} else if relStart == relEnd {
-			// Single-line selection within one visible row.
-			result = append(result, highlightRegionDetached(line, sc, ec))
+			result = append(result, transcript.HighlightRegion(line, sc, ec))
 		} else if i == relStart {
-			// First line: highlight from startCol to end of line.
-			result = append(result, highlightRegionDetached(line, sc, -1))
+			result = append(result, transcript.HighlightRegion(line, sc, -1))
 		} else if i == relEnd {
-			// Last line: highlight from start of line to endCol.
-			result = append(result, highlightRegionDetached(line, 0, ec))
+			result = append(result, transcript.HighlightRegion(line, 0, ec))
 		} else {
-			// Middle selected line: entire line highlighted.
-			result = append(result, wrapFullLineDetached(line))
+			result = append(result, transcript.WrapFullLine(line))
 		}
 	}
 
 	return strings.Join(result, "\n")
-}
-
-// highlightRegionDetached is a standalone version of highlightRegion
-// that works on a single line without needing the full clean/raw pair.
-// start and end are display-column (rune) indices; end=-1 means to end.
-func highlightRegionDetached(raw string, start, end int) string {
-	clean := transcript.StripANSI(raw)
-	if start < 0 {
-		start = 0
-	}
-	cleanRunes := utf8.RuneCountInString(clean)
-	if end < 0 || end > cleanRunes {
-		end = cleanRunes
-	}
-	if start >= cleanRunes || start >= end {
-		return raw
-	}
-
-	rawStart := transcript.CleanColToRaw(clean, raw, start)
-	rawEnd := transcript.CleanColToRaw(clean, raw, end)
-
-	var sb strings.Builder
-	sb.WriteString(raw[:rawStart])
-	sb.WriteString("\x1b[7m")
-	middle := raw[rawStart:rawEnd]
-	for i := 0; i < len(middle); {
-		if middle[i] == '\x1b' {
-			seqStart := i
-			for i < len(middle) && middle[i] != 'm' {
-				i++
-			}
-			if i < len(middle) {
-				i++
-			}
-			seq := middle[seqStart:i]
-			sb.WriteString(seq)
-			if seq == "\x1b[0m" || seq == "\x1b[27m" {
-				sb.WriteString("\x1b[7m")
-			}
-		} else {
-			sb.WriteByte(middle[i])
-			i++
-		}
-	}
-	sb.WriteString("\x1b[27m")
-	sb.WriteString(raw[rawEnd:])
-	return sb.String()
-}
-
-// wrapFullLineDetached wraps an entire line in reverse video,
-// re-applying reverse after any embedded ANSI reset.
-func wrapFullLineDetached(raw string) string {
-	if raw == "" {
-		return "\x1b[7m\x1b[27m"
-	}
-	var sb strings.Builder
-	sb.WriteString("\x1b[7m")
-	for i := 0; i < len(raw); {
-		if raw[i] == '\x1b' {
-			start := i
-			for i < len(raw) && raw[i] != 'm' {
-				i++
-			}
-			if i < len(raw) {
-				i++
-			}
-			seq := raw[start:i]
-			sb.WriteString(seq)
-			if seq == "\x1b[0m" || seq == "\x1b[27m" {
-				sb.WriteString("\x1b[7m")
-			}
-		} else {
-			sb.WriteByte(raw[i])
-			i++
-		}
-	}
-	sb.WriteString("\x1b[27m")
-	return sb.String()
-}
-
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-// formatDuration renders a duration as a compact human-readable string,
-// e.g. "3s", "2m15s", "1h3m".
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		m := int(d.Minutes())
-		s := int(d.Seconds()) % 60
-		if s == 0 {
-			return fmt.Sprintf("%dm", m)
-		}
-		return fmt.Sprintf("%dm%ds", m, s)
-	}
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	if m == 0 {
-		return fmt.Sprintf("%dh", h)
-	}
-	return fmt.Sprintf("%dh%dm", h, m)
 }

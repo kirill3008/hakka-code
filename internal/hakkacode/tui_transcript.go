@@ -1,8 +1,6 @@
 package hakkacode
 
 import (
-	"encoding/json"
-	"fmt"
 	"strings"
 
 	"hakka-code/internal/hakkacode/transcript"
@@ -40,40 +38,6 @@ func (m *model) appendUserPrompt(rawLine string) {
 		Type: transcript.EntryUserPrompt,
 		Raw:  strings.TrimRight(renderUserPrompt("❯ "+rawLine), "\n"),
 	})
-}
-
-func (m *model) appendAssistantText(raw string) {
-	m.appendEntry(&transcript.TranscriptEntry{
-		Type: transcript.EntryAssistantText,
-		Raw:  strings.TrimRight(renderMarkdown(raw), "\n") + "\n",
-	})
-}
-
-func (m *model) appendToolCall(name string, id string, status transcript.ToolStatus, args json.RawMessage, snippet, errText string) {
-	snippet = sanitizeSnippet(snippet)
-	entry := &transcript.TranscriptEntry{
-		Type:       transcript.EntryToolCall,
-		ToolName:   name,
-		ToolID:     id,
-		ToolStatus: status,
-		ToolArgs:   args,
-		ToolError:  errText,
-		Collapsed:  status == transcript.ToolOK,
-	}
-	if status == transcript.ToolOK {
-		if snippet != "" {
-			entry.Raw = fmt.Sprintf("✓ %s · %s", name, snippet)
-		} else {
-			entry.Raw = fmt.Sprintf("✓ %s", name)
-		}
-	} else {
-		if snippet != "" {
-			entry.Raw = fmt.Sprintf("✗ %s · %s: %s", name, snippet, errText)
-		} else {
-			entry.Raw = fmt.Sprintf("✗ %s: %s", name, errText)
-		}
-	}
-	m.appendEntry(entry)
 }
 
 func sanitizeSnippet(s string) string {

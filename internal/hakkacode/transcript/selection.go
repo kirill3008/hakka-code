@@ -13,11 +13,6 @@ func StripANSI(s string) string {
 	return ansiRE.ReplaceAllString(s, "")
 }
 
-// stripANSI removes ANSI escape sequences from a string.
-func stripANSI(s string) string {
-	return StripANSI(s)
-}
-
 // SelectionState is the phase of a text selection drag.
 type SelectionState int
 
@@ -122,12 +117,10 @@ func (s *Selection) Text(content string) string {
 		return ""
 	}
 
-	// Build a parallel structure: cleanLines (ANSI-stripped) for
-	// indexing by mouse-column, rawLines for the output text.
 	rawLines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	cleanLines := make([]string, len(rawLines))
 	for i, l := range rawLines {
-		cleanLines[i] = stripANSI(l)
+		cleanLines[i] = StripANSI(l)
 	}
 
 	sl, sc, el, ec := s.Normalized()
@@ -154,7 +147,6 @@ func (s *Selection) Text(content string) string {
 
 // sliceByColumns returns a substring of s from display-column startCol
 // to endCol. If endCol is negative, returns from startCol to end of s.
-// Columns count runes, not bytes.
 func sliceByColumns(s string, startCol, endCol int) string {
 	bi := colToByteOffset(s, startCol)
 	if endCol < 0 {
@@ -173,7 +165,7 @@ func sliceByColumns(s string, startCol, endCol int) string {
 // colToByteOffset converts a display-column (rune) index into the byte
 // offset within s. Returns len(s) when col is beyond the string.
 func colToByteOffset(s string, col int) int {
-	ri := 0 // current rune index
+	ri := 0
 	for bi := 0; bi < len(s); {
 		if ri == col {
 			return bi
@@ -185,10 +177,8 @@ func colToByteOffset(s string, col int) int {
 	return len(s)
 }
 
-// ApplyHighlight overlays the selection highlight onto content.
-// Returns the content with reverse-video escapes around selected regions.
-// Handles embedded ANSI reset sequences (\033[0m, \033[27m) by
-// re-applying reverse video after each reset within a highlighted region.
+// ApplyHighlight overlays the selection highlight onto content, using
+// the selection's normalized line/column ranges.
 func (s *Selection) ApplyHighlight(content string) string {
 	if !s.IsActive() || content == "" {
 		return content
@@ -196,7 +186,7 @@ func (s *Selection) ApplyHighlight(content string) string {
 	rawLines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	cleanLines := make([]string, len(rawLines))
 	for i, l := range rawLines {
-		cleanLines[i] = stripANSI(l)
+		cleanLines[i] = StripANSI(l)
 	}
 	sl, sc, el, ec := s.Normalized()
 
@@ -208,88 +198,58 @@ func (s *Selection) ApplyHighlight(content string) string {
 		}
 
 		if sl == el {
-			result = append(result, highlightRegion(raw, cleanLines[i], sc, ec))
+			result = append(result, HighlightRegion(raw, sc, ec))
 			continue
 		}
 
 		if i == sl {
-			result = append(result, highlightRegion(raw, cleanLines[i], sc, utf8.RuneCountInString(cleanLines[i])))
+			result = append(result, HighlightRegion(raw, sc, utf8.RuneCountInString(cleanLines[i])))
 		} else if i == el {
 			end := ec
 			cleanRuneCount := utf8.RuneCountInString(cleanLines[i])
 			if end > cleanRuneCount {
 				end = cleanRuneCount
 			}
-			result = append(result, highlightRegion(raw, cleanLines[i], 0, end))
+			result = append(result, HighlightRegion(raw, 0, end))
 		} else {
-			// Middle line: wrap whole line in reverse video, but
-			// re-apply reverse after any embedded reset sequences
-			// (\033[0m or \033[27m) within the content.
-			result = append(result, wrapFullLine(raw))
+			result = append(result, WrapFullLine(raw))
 		}
 	}
 
 	return strings.Join(result, "\n")
 }
 
-// wrapFullLine wraps an entire line in reverse video, handling any
-// embedded ANSI reset sequences that would cancel the highlight.
-func wrapFullLine(raw string) string {
-	if raw == "" {
-		return ansiReverse + ansiReset
-	}
-	var sb strings.Builder
-	sb.WriteString(ansiReverse)
+// ---------------------------------------------------------------------------
+// Public single-line highlight helpers — used directly from the TUI (avoiding
+// duplicated logic in tui.go). All coordinates are rune (display-column)
+// indices. end == -1 means "to end of line".
+// ---------------------------------------------------------------------------
 
-	for i := 0; i < len(raw); {
-		if raw[i] == '\x1b' {
-			// Find the end of the escape sequence.
-			start := i
-			for i < len(raw) && raw[i] != 'm' {
-				i++
-			}
-			if i < len(raw) {
-				i++ // include the 'm'
-			}
-			seq := raw[start:i]
-			sb.WriteString(seq)
-			// After \033[0m or \033[27m, re-apply reverse video.
-			if seq == "\x1b[0m" || seq == "\x1b[27m" {
-				sb.WriteString(ansiReverse)
-			}
-		} else {
-			sb.WriteByte(raw[i])
-			i++
-		}
-	}
-
-	sb.WriteString(ansiReset)
-	return sb.String()
-}
-
-// highlightRegion wraps a portion of raw (which may contain ANSI codes)
-// in reverse-video. cleanStart and cleanEnd are rune (display-column)
-// indices in the ANSI-stripped version of raw. Any ANSI reset sequences
-// inside the highlighted region are followed by a re-application of
-// reverse video.
-func highlightRegion(raw, clean string, start, end int) string {
+// HighlightRegion wraps a portion of a single line in reverse-video.
+// start and end are display-column (rune) indices in the ANSI-stripped
+// content. Any ANSI reset sequences inside the highlighted region are
+// followed by a re-application of reverse video.
+func HighlightRegion(raw string, start, end int) string {
+	clean := StripANSI(raw)
 	cleanRunes := utf8.RuneCountInString(clean)
+
+	if start < 0 {
+		start = 0
+	}
+	if end < 0 || end > cleanRunes {
+		end = cleanRunes
+	}
 	if start >= cleanRunes || start >= end {
 		return raw
 	}
-	if end > cleanRunes {
-		end = cleanRunes
-	}
-	// Map clean-column indices to raw byte offsets.
+
 	rawStart := cleanColToRaw(clean, raw, start)
 	rawEnd := cleanColToRaw(clean, raw, end)
 
-	// Build: prefix + reverse + middle(re-applied) + reset + suffix.
 	var sb strings.Builder
 	sb.WriteString(raw[:rawStart])
 	sb.WriteString(ansiReverse)
 
-	// Write the middle region, re-applying reverse after each reset.
 	middle := raw[rawStart:rawEnd]
 	for i := 0; i < len(middle); {
 		if middle[i] == '\x1b' {
@@ -316,6 +276,39 @@ func highlightRegion(raw, clean string, start, end int) string {
 	return sb.String()
 }
 
+// WrapFullLine wraps an entire line in reverse video, re-applying
+// reverse after any embedded ANSI reset sequences.
+func WrapFullLine(raw string) string {
+	if raw == "" {
+		return ansiReverse + ansiReset
+	}
+	var sb strings.Builder
+	sb.WriteString(ansiReverse)
+
+	for i := 0; i < len(raw); {
+		if raw[i] == '\x1b' {
+			start := i
+			for i < len(raw) && raw[i] != 'm' {
+				i++
+			}
+			if i < len(raw) {
+				i++ // include the 'm'
+			}
+			seq := raw[start:i]
+			sb.WriteString(seq)
+			if seq == "\x1b[0m" || seq == "\x1b[27m" {
+				sb.WriteString(ansiReverse)
+			}
+		} else {
+			sb.WriteByte(raw[i])
+			i++
+		}
+	}
+
+	sb.WriteString(ansiReset)
+	return sb.String()
+}
+
 // CleanColToRaw maps a column index in the ANSI-stripped string to a
 // byte offset in the raw string (which contains ANSI escapes and
 // multi-byte UTF-8 characters). Each rune — regardless of its byte
@@ -324,26 +317,20 @@ func CleanColToRaw(clean, raw string, col int) int {
 	return cleanColToRaw(clean, raw, col)
 }
 
-// cleanColToRaw maps a column index in the ANSI-stripped string to a
-// byte offset in the raw string (which contains ANSI escapes and
-// multi-byte UTF-8 characters). Each rune — regardless of its byte
-// length — occupies exactly one display column.
+// cleanColToRaw is the private implementation of CleanColToRaw.
 func cleanColToRaw(clean, raw string, col int) int {
 	if col <= 0 {
 		return 0
 	}
-	ci := 0 // current clean-column position
+	ci := 0
 	for ri := 0; ri < len(raw); ri++ {
 		b := raw[ri]
 		if b == '\x1b' {
-			// Skip entire ANSI escape sequence.
 			for ri+1 < len(raw) && raw[ri] != 'm' {
 				ri++
 			}
 			continue
 		}
-		// Multi-byte UTF-8 continuation bytes (0x80–0xBF) don't start a
-		// new rune — skip them without incrementing the column counter.
 		if b&0xC0 == 0x80 {
 			continue
 		}
