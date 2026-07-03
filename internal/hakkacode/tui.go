@@ -2,6 +2,7 @@ package hakkacode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -70,7 +71,7 @@ func Run(ctx context.Context, cfg Config) error {
 type bootMsg struct {
 	summary   *protocol.SessionSummary
 	sessionID string
-	messages  []map[string]any
+	events    []map[string]any // history replay as wire-format events
 	resumed   bool
 	cwdWarn   string
 	toolWarn  string
@@ -472,8 +473,19 @@ func (m model) handleBoot(msg bootMsg) model {
 		m.appendLine("tools · enabled " + msg.tags)
 	}
 	m.appendLine("type /help for commands, /exit to quit")
-	if len(msg.messages) > 0 {
-		m.appendLine("\n" + strings.TrimRight(formatMessageHistory(msg.messages), "\n"))
+
+	// Replay stored history events through the same code path as live
+	// turns — each event is converted to a ResponseFrame and processed
+	// by handleFrame. This ensures tool rendering is identical to live
+	// chat, with args/snippet from the server driving the display.
+	// NOTE: return cmds (waitFrame, autoRenameCmd) are ignored during
+	// replay since this runs inside the boot handler synchronously.
+	if len(msg.events) > 0 {
+		for _, evt := range msg.events {
+			frame := eventToResponseFrame(evt)
+			mdl, _ := m.handleFrame(frame)
+			m = mdl.(model)
+		}
 	}
 	return m
 }
@@ -528,6 +540,12 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 	}
 
 	switch frame.Type {
+	case protocol.TypeChat:
+		// History replay only — live chat frames aren't sent to
+		// handleFrame. Echo the user prompt just like submit() does.
+		if frame.Text != "" {
+			m.appendUserPrompt(frame.Text)
+		}
 	case protocol.TypeDelta:
 		m.spinLabel = "Writing response"
 		if frame.Text != "" {
@@ -556,8 +574,13 @@ func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
 				if frame.Status == protocol.StatusErr {
 					status = transcript.ToolErr
 				}
-				snippet := toolSnippet(frame)
-				m.appendToolCall(toolNameFromFrame(frame), frame.ID, status, frame.Args, snippet, frame.Error)
+				var snippet string
+				var args json.RawMessage
+				if startFrame != nil {
+					snippet = toolSnippet(*startFrame)
+					args = startFrame.Args
+				}
+				m.appendToolCall(toolNameFromFrame(frame), frame.ID, status, args, snippet, frame.Error)
 			}
 			m.spinLabel = toolsLabel(m.toolStarts)
 		}

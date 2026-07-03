@@ -1,7 +1,6 @@
 package hakkacode
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -200,7 +199,9 @@ func formatToolList(data map[string]any) string {
 	return renderPlainTable(headers, rows)
 }
 
-// formatMessageHistory replays stored messages mirroring live turn output.
+// formatMessageHistory replays stored messages when Events replay is
+// not available (legacy servers). Prefer the Events field when present;
+// it carries args/snippet in wire format matching live streaming.
 func formatMessageHistory(messages []map[string]any) string {
 	var b strings.Builder
 	for _, m := range messages {
@@ -213,203 +214,47 @@ func formatMessageHistory(messages []map[string]any) string {
 			b.WriteString(renderMarkdown(content))
 			b.WriteString("\n")
 		case "tool":
-			b.WriteString(formatHistoryToolLine(m))
-		}
-	}
-	return b.String()
-}
-
-// formatHistoryToolLine renders a single stored tool message using the
-// same visual style as live tool events.
-func formatHistoryToolLine(m map[string]any) string {
-	name := strField(m, "name")
-	if name == "" {
-		name = strField(m, "tool_name")
-	}
-	if name == "" {
-		name = strField(m, "tool")
-	}
-	if name == "" {
-		name = "tool"
-	}
-
-	status := strField(m, "status")
-	errText := strField(m, "error")
-	content := strField(m, "content")
-
-	// Extract args — try multiple possible locations/formats.
-	var args map[string]any
-	switch v := m["args"].(type) {
-	case map[string]any:
-		args = v
-	case string:
-		_ = json.Unmarshal([]byte(v), &args)
-	}
-	// Some servers nest tool params under "content" as JSON.
-	if args == nil {
-		if s, ok := m["content"].(string); ok {
-			_ = json.Unmarshal([]byte(s), &args)
-		}
-	}
-
-	// Prefer our compact snippet built from args, then fall back to the
-	// server-provided snippet/result fields (which may contain full output).
-	snippet := buildHistorySnippet(name, args)
-	if snippet == "" {
-		snippet = strField(m, "snippet")
-	}
-	if snippet == "" {
-		snippet = strField(m, "result")
-	}
-	if snippet == "" {
-		snippet = compactJSONStr(content)
-	}
-
-	isErr := status == "err" || status == "error" || errText != ""
-
-	if isErr {
-		if errText == "" {
-			errText = content
-		}
-		var sb strings.Builder
-		if snippet != "" {
-			fmt.Fprintf(&sb, "✗ %s · %s: %s\n", name, snippet, errText)
-		} else {
-			fmt.Fprintf(&sb, "✗ %s: %s\n", name, errText)
-		}
-		if name == "edit_file" && args != nil {
-			old, _ := args["old"].(string)
-			neww, _ := args["new"].(string)
-			if d := diffIfSmall(old, neww, 15); d != "" {
-				sb.WriteString(d)
+			name := strField(m, "name")
+			if name == "" {
+				name = strField(m, "tool_name")
 			}
-		}
-		return sb.String()
-	}
-
-	if name == "edit_file" && args != nil {
-		// For successful edit_file, show diff if small enough.
-		old, _ := args["old"].(string)
-		neww, _ := args["new"].(string)
-		if d := diffIfSmall(old, neww, 15); d != "" {
+			if name == "" {
+				name = strField(m, "tool")
+			}
+			if name == "" {
+				name = "tool"
+			}
+			status := strField(m, "status")
+			errText := strField(m, "error")
+			snippet := strField(m, "snippet")
 			if snippet == "" {
-				snippet = name
+				snippet = strField(m, "result")
 			}
-			return fmt.Sprintf("✓ %s · %s\n%s", name, snippet, d)
-		}
-	}
-
-	if snippet != "" {
-		return fmt.Sprintf("✓ %s · %s\n", name, snippet)
-	}
-	return fmt.Sprintf("✓ %s\n", name)
-}
-
-// buildHistorySnippet builds a tool-specific human-readable snippet for
-// a stored tool message, matching the server's live snippet style.
-func buildHistorySnippet(name string, args map[string]any) string {
-	if args == nil {
-		return ""
-	}
-
-	switch name {
-	case "shell":
-		if cmd := strField(args, "cmd"); cmd != "" {
-			return cmd
-		}
-
-	case "read_file":
-		path := strField(args, "path")
-		if path == "" {
-			return ""
-		}
-		offset, hasOffset := args["offset"].(float64)
-		limit, hasLimit := args["limit"].(float64)
-		if hasOffset && hasLimit {
-			start := int(offset) + 1 // 1-based line numbering
-			end := start + int(limit) - 1
-			if end > start {
-				return fmt.Sprintf("%s %d-%d", path, start, end)
+			if snippet == "" {
+				// Try to extract a human-readable snippet from args.
+				if args, ok := m["args"]; ok {
+					snippet = toolArgsSnippet(name, args)
+				}
 			}
-			return fmt.Sprintf("%s @%d+%d", path, int(offset), int(limit))
-		}
-		if hasOffset {
-			return fmt.Sprintf("%s @%d", path, int(offset))
-		}
-		if hasLimit {
-			return fmt.Sprintf("%s (%d lines)", path, int(limit))
-		}
-		return path
+			if snippet == "" {
+				snippet = compactJSONStr(content)
+			}
 
-	case "write_file":
-		path := strField(args, "path")
-		if path == "" {
-			return ""
+			if status == "err" || status == "error" || errText != "" {
+				if errText == "" {
+					errText = content
+				}
+				if snippet != "" {
+					fmt.Fprintf(&b, "✗ %s · %s: %s\n", name, snippet, errText)
+				} else {
+					fmt.Fprintf(&b, "✗ %s: %s\n", name, errText)
+				}
+			} else if snippet != "" {
+				fmt.Fprintf(&b, "✓ %s · %s\n", name, snippet)
+			} else {
+				fmt.Fprintf(&b, "✓ %s\n", name)
+			}
 		}
-		return path
-
-	case "edit_file":
-		path := strField(args, "path")
-		if path == "" {
-			return ""
-		}
-		old := strField(args, "old")
-		neww := strField(args, "new")
-		oldLines := strings.Count(old, "\n") + 1
-		newLines := strings.Count(neww, "\n") + 1
-		if old == "" {
-			return fmt.Sprintf("%s +%d", path, newLines)
-		}
-		if neww == "" {
-			return fmt.Sprintf("%s -%d", path, oldLines)
-		}
-		return fmt.Sprintf("%s -%d+%d", path, oldLines, newLines)
-
-	case "http_get":
-		if u := strField(args, "url"); u != "" {
-			return u
-		}
-
-	case "search":
-		pattern := strField(args, "pattern")
-		path := strField(args, "path")
-		if pattern != "" && path != "" {
-			return fmt.Sprintf("\"%s\" in %s", pattern, path)
-		}
-		if pattern != "" {
-			return fmt.Sprintf("\"%s\"", pattern)
-		}
-		if path != "" {
-			return path
-		}
-	}
-
-	// Fallback: show path-like fields.
-	for _, key := range []string{"path", "pattern", "url"} {
-		if v := strField(args, key); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// diffIfSmall returns a compact +/- diff when the total diff is ≤maxLines.
-// Returns "" otherwise (or if both strings are empty).
-func diffIfSmall(old, neww string, maxLines int) string {
-	if old == "" && neww == "" {
-		return ""
-	}
-	oldLines := strings.Split(old, "\n")
-	newLines := strings.Split(neww, "\n")
-	if len(oldLines)+len(newLines) > maxLines {
-		return ""
-	}
-	var b strings.Builder
-	for _, l := range oldLines {
-		fmt.Fprintf(&b, "  %s- %s%s\n", sgrRed, l, sgrReset)
-	}
-	for _, l := range newLines {
-		fmt.Fprintf(&b, "  %s+ %s%s\n", sgrGreen, l, sgrReset)
 	}
 	return b.String()
 }

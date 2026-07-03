@@ -228,14 +228,15 @@ func (c *Client) MostRecentSession(ctx context.Context) (map[string]any, error) 
 }
 
 // GetSession fetches a session by id or unique prefix, along with its
-// stored message history.
-func (c *Client) GetSession(ctx context.Context, id string) (*protocol.SessionSummary, string, []map[string]any, error) {
+// stored message history both as raw Messages and as replay-friendly
+// Events (same wire format as live streaming frames).
+func (c *Client) GetSession(ctx context.Context, id string) (*protocol.SessionSummary, string, []map[string]any, []map[string]any, error) {
 	frame, err := c.ExecuteCommand(ctx, "", "get_session", map[string]any{"id": id})
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", nil, nil, err
 	}
 	if frame.Error != "" {
-		return nil, "", nil, errors.New(frame.Error)
+		return nil, "", nil, nil, errors.New(frame.Error)
 	}
 	sessionID := frame.SessionID
 	var summary *protocol.SessionSummary
@@ -246,9 +247,9 @@ func (c *Client) GetSession(ctx context.Context, id string) (*protocol.SessionSu
 		}
 	}
 	if sessionID == "" {
-		return nil, "", nil, fmt.Errorf("get_session returned no session id")
+		return nil, "", nil, nil, fmt.Errorf("get_session returned no session id")
 	}
-	return summary, sessionID, frame.Messages, nil
+	return summary, sessionID, frame.Messages, frame.Events, nil
 }
 
 // CreateSession creates a new session on the server.

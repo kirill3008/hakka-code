@@ -87,12 +87,60 @@ func renderCommandResult(cmd string, frame protocol.ResponseFrame) string {
 	return renderCommandResultInteractive(cmd, frame).text
 }
 
+// replayEvents renders a sequence of stored history events (from the
+// Events replay) into a human-readable string. Tool events use the same
+// render path as live tool frames (renderToolEvent).
+func replayEvents(events []map[string]any) string {
+	var b strings.Builder
+	// Track tool starts so we can show diffs for edit_file errors.
+	toolStarts := map[string]protocol.ResponseFrame{}
+
+	for _, evt := range events {
+		frame := eventToResponseFrame(evt)
+		switch frame.Type {
+		case protocol.TypeChat:
+			if frame.Text != "" {
+				b.WriteString(renderUserPrompt("❯ " + frame.Text))
+			}
+		case protocol.TypeDelta:
+			if frame.Text != "" {
+				b.WriteString(renderMarkdown(frame.Text))
+				b.WriteByte('\n')
+			}
+		case protocol.TypeTool:
+			switch frame.Status {
+			case protocol.StatusStart:
+				if frame.ID != "" {
+					toolStarts[frame.ID] = frame
+				}
+			default:
+				var startFrame *protocol.ResponseFrame
+				if s, ok := toolStarts[frame.ID]; ok {
+					startFrame = &s
+				}
+				delete(toolStarts, frame.ID)
+				out := renderToolEvent(startFrame, frame)
+				if out != "" {
+					b.WriteString(out)
+				}
+			}
+		case protocol.TypeDone:
+			// Done marker in history is a terminal — no text/stats.
+		}
+	}
+	return b.String()
+}
+
 func renderSessionFrame(frame protocol.ResponseFrame) string {
 	var b strings.Builder
 	if frame.Session != nil {
 		b.WriteString(formatSessionDetail(frame.Session))
 	}
-	if len(frame.Messages) > 0 {
+	// Prefer Events replay over Messages for rendering history, since
+	// events carry args/snippet in the same wire format as live turns.
+	if len(frame.Events) > 0 {
+		b.WriteString(replayEvents(frame.Events))
+	} else if len(frame.Messages) > 0 {
 		b.WriteString(formatMessageHistory(frame.Messages))
 	}
 	return b.String()
@@ -104,23 +152,30 @@ func renderSessionFrame(frame protocol.ResponseFrame) string {
 // toolStarts).  For "ok" it returns a one-line confirmation.  For "err"
 // it returns the full picture (header, diff/preview if startFrame is
 // provided, error detail).
+//
+// Snippet and args are taken from the startFrame (paired by id).
+// Completion frames (ok/err) do not carry this data.
 func renderToolEvent(startFrame *protocol.ResponseFrame, frame protocol.ResponseFrame) string {
 	name := toolNameFromFrame(frame)
 	if name == "" {
 		name = "tool"
 	}
 
+	// Always pull snippet from the start frame.
+	var snippet string
+	if startFrame != nil {
+		snippet = toolSnippet(*startFrame)
+	}
+
 	var b strings.Builder
 	switch frame.Status {
 	case "ok":
-		snippet := toolSnippet(frame)
 		if snippet != "" {
 			fmt.Fprintf(&b, "✓ %s · %s\n", name, snippet)
 		} else {
 			fmt.Fprintf(&b, "✓ %s\n", name)
 		}
 	case "err":
-		snippet := toolSnippet(frame)
 		if snippet != "" {
 			fmt.Fprintf(&b, "\n⏺ %s · %s\n", name, snippet)
 		} else {

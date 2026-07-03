@@ -18,7 +18,7 @@ type Connector interface {
 type SessionStore interface {
 	ListSessions(ctx context.Context) ([]map[string]any, error)
 	MostRecentSession(ctx context.Context) (map[string]any, error)
-	GetSession(ctx context.Context, id string) (*protocol.SessionSummary, string, []map[string]any, error)
+	GetSession(ctx context.Context, id string) (*protocol.SessionSummary, string, []map[string]any, []map[string]any, error)
 	CreateSession(ctx context.Context) (*protocol.SessionSummary, string, error)
 }
 

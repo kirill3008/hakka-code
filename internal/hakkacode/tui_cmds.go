@@ -16,12 +16,12 @@ func bootCmd(ctx context.Context, client backend.Backend, cfg Config) tea.Cmd {
 			return bootMsg{err: fmt.Errorf("read welcome: %w", err)}
 		}
 
-		summary, sessionID, messages, resumed, err := resumeOrCreateSession(ctx, client)
+		summary, sessionID, events, resumed, err := resumeOrCreateSession(ctx, client)
 		if err != nil {
 			return bootMsg{err: fmt.Errorf("resume/create session: %w", err)}
 		}
 
-		msg := bootMsg{summary: summary, sessionID: sessionID, messages: messages, resumed: resumed}
+		msg := bootMsg{summary: summary, sessionID: sessionID, events: events, resumed: resumed}
 
 		if cfg.CWD != "" {
 			if _, err := client.ExecuteCommand(ctx, sessionID, "cwd_set", map[string]any{"cwd": cfg.CWD}); err != nil {
@@ -52,11 +52,11 @@ func resumeOrCreateSession(ctx context.Context, client backend.Backend) (*protoc
 		return summary, sessionID, nil, false, err
 	}
 	id, _ := recent["id"].(string)
-	summary, sessionID, messages, err := client.GetSession(ctx, id)
+	summary, sessionID, _, events, err := client.GetSession(ctx, id)
 	if err != nil {
 		return nil, "", nil, false, err
 	}
-	return summary, sessionID, messages, true, nil
+	return summary, sessionID, events, true, nil
 }
 
 func waitFrame(ctx context.Context, client backend.Backend) tea.Cmd {
