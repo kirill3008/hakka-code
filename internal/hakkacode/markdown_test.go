@@ -63,6 +63,21 @@ func TestRenderTableFitsContentWidth(t *testing.T) {
 	}
 }
 
+func TestRenderTableWrapsInsteadOfOverflowing(t *testing.T) {
+	long := strings.Repeat("word ", 40) // far wider than the 100-col fallback
+	raw := "| a | b |\n|---|---|\n| " + long + " | short |"
+	out := renderTable(raw)
+
+	for _, line := range strings.Split(out, "\n") {
+		if l := visibleLen(line); l > terminalWidth() {
+			t.Fatalf("line exceeds terminal width (%d > %d): %q", l, terminalWidth(), line)
+		}
+	}
+	if !strings.Contains(out, "word") {
+		t.Fatalf("expected wrapped content to still contain the cell text: %q", out)
+	}
+}
+
 func TestRenderCodeBlockHasUniformBackground(t *testing.T) {
 	out := renderCodeBlock("go", "func main() {\n\tfmt.Println(\"hi\")\n}")
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")

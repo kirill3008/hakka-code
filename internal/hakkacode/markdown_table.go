@@ -13,8 +13,9 @@ import (
 const tableBorderColor = "78"
 
 // renderTable renders a raw GFM pipe-table block (header + separator +
-// rows) with a full border, sized to the content's own longest cell —
-// not stretched to the terminal width like glamour's default table.
+// rows) with a full border, sized to the content's own longest cell up to
+// the terminal width — past that, cells wrap onto multiple lines instead
+// of overflowing off the right edge.
 func renderTable(raw string) string {
 	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
 	if len(lines) < 2 {
@@ -27,22 +28,44 @@ func renderTable(raw string) string {
 		rows = append(rows, splitTableRow(l))
 	}
 
-	t := table.New().
-		Border(lipgloss.NormalBorder()).
-		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color(tableBorderColor))).
-		BorderTop(true).BorderBottom(true).BorderLeft(true).BorderRight(true).
-		BorderHeader(true).BorderColumn(true).BorderRow(false).
-		Headers(header...).
-		Rows(rows...).
-		StyleFunc(func(_, col int) lipgloss.Style {
-			st := lipgloss.NewStyle().Padding(0, 1)
-			if col >= 0 && col < len(aligns) {
-				st = st.Align(aligns[col])
-			}
-			return st
-		})
+	build := func() *table.Table {
+		return table.New().
+			Border(lipgloss.NormalBorder()).
+			BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color(tableBorderColor))).
+			BorderTop(true).BorderBottom(true).BorderLeft(true).BorderRight(true).
+			BorderHeader(true).BorderColumn(true).BorderRow(false).
+			Headers(header...).
+			Rows(rows...).
+			StyleFunc(func(_, col int) lipgloss.Style {
+				st := lipgloss.NewStyle().Padding(0, 1)
+				if col >= 0 && col < len(aligns) {
+					st = st.Align(aligns[col])
+				}
+				return st
+			})
+	}
 
-	return t.String() + "\n"
+	// Render at natural content width first. Only clamp to the terminal
+	// width (wrapping cells onto multiple lines) if that natural width
+	// would overflow — a small table shouldn't get stretched.
+	out := build().String()
+	if widestLine(out) > terminalWidth() {
+		out = build().Width(terminalWidth()).Wrap(true).String()
+	}
+
+	return out + "\n"
+}
+
+// widestLine returns the visible-column width of the widest line in s,
+// ignoring ANSI escape sequences.
+func widestLine(s string) int {
+	max := 0
+	for _, line := range strings.Split(s, "\n") {
+		if w := lipgloss.Width(line); w > max {
+			max = w
+		}
+	}
+	return max
 }
 
 func splitTableRow(line string) []string {
