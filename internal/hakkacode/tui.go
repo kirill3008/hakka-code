@@ -87,13 +87,23 @@ type copyToClipboardMsg struct {
 
 // --- model ---
 
+// sessionState groups everything tied to the session currently shown —
+// its identity and the turn in flight against it — as distinct from the
+// TUI's widget/rendering state.
+type sessionState struct {
+	id   string
+	name string
+
+	// turn is non-nil only while a turn is in flight.
+	turn *turnState
+}
+
 type model struct {
 	ctx    context.Context
 	cfg    Config
 	client backend.Backend
 
-	sessionID   string
-	sessionName string
+	session sessionState
 
 	viewport viewport.Model
 	input    inputWidget
@@ -101,9 +111,6 @@ type model struct {
 	ready    bool
 	width    int
 	height   int
-
-	// turn is non-nil only while a turn is in flight.
-	turn *turnState
 
 	transcriptEntries *transcript.Transcript
 	selection         *transcript.Selection
@@ -157,7 +164,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case autoRenameMsg:
 		if msg.name != "" {
-			m.sessionName = msg.name
+			m.session.name = msg.name
 			m.appendLine(dimf("session renamed · %s", msg.name))
 		}
 		return m, nil
@@ -166,7 +173,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCopyToClipboard(msg)
 
 	case spinTickMsg:
-		if !m.turn.active() {
+		if !m.session.turn.active() {
 			return m, nil
 		}
 		m.spinner.tick()
@@ -207,9 +214,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.Type {
 	case tea.KeyCtrlC:
-		if m.turn.active() {
+		if m.session.turn.active() {
 			m.spinner.setLabel("Cancelling")
-			return m, cancelTurnCmd(m.ctx, m.client, m.sessionID)
+			return m, cancelTurnCmd(m.ctx, m.client, m.session.id)
 		}
 		return m, tea.Quit
 
@@ -221,7 +228,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyEnter:
-		if m.turn.active() {
+		if m.session.turn.active() {
 			return m, nil
 		}
 		return m.submit()
@@ -259,12 +266,12 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m.handleSlash(sc)
 	}
 
-	if err := m.client.SendInput(m.sessionID, line); err != nil {
+	if err := m.client.SendInput(m.session.id, line); err != nil {
 		m.fatalErr = err
 		return m, tea.Quit
 	}
 	m.appendUserPrompt(line)
-	m.turn = newTurnState()
+	m.session.turn = newTurnState()
 	m.spinner.start("Thinking")
 	return m, tea.Batch(waitFrame(m.ctx, m.client), spinTick())
 }
@@ -277,17 +284,17 @@ func (m model) handleSlash(sc *SlashCommand) (tea.Model, tea.Cmd) {
 	case "exit":
 		return m, tea.Quit
 	case "cancel":
-		if m.turn.active() {
+		if m.session.turn.active() {
 			m.spinner.setLabel("Cancelling")
 		}
-		return m, cancelTurnCmd(m.ctx, m.client, m.sessionID)
+		return m, cancelTurnCmd(m.ctx, m.client, m.session.id)
 	case "clear":
 		m.transcriptEntries = transcript.New()
 		m.viewport.SetContent("")
 		return m, nil
 	}
 	if sc.Remote != nil {
-		return m, execRemoteCmd(m.ctx, m.client, m.sessionID, sc.Remote.Cmd, sc.Remote.Params)
+		return m, execRemoteCmd(m.ctx, m.client, m.session.id, sc.Remote.Cmd, sc.Remote.Params)
 	}
 	return m, nil
 }
@@ -298,7 +305,7 @@ func (m model) handleBoot(msg bootMsg) model {
 		m.appendLine(fmt.Sprintf("error: %v", msg.err))
 		return m
 	}
-	m.sessionID = msg.sessionID
+	m.session.id = msg.sessionID
 
 	name, shortID, mdl := "", msg.sessionID, ""
 	if msg.summary != nil {
@@ -308,7 +315,7 @@ func (m model) handleBoot(msg bootMsg) model {
 		}
 		mdl = msg.summary.Model
 	}
-	m.sessionName = name
+	m.session.name = name
 
 	verb := "session"
 	if msg.resumed {
@@ -345,13 +352,17 @@ func (m model) handleBoot(msg bootMsg) model {
 	// A temporary turnState is injected so handleFrame's tool/delta/done
 	// handling has a place to accumulate state — just like a live turn.
 	if len(msg.events) > 0 {
-		m.turn = newLazyTurnState()
+		m.session.turn = newLazyTurnState()
 		for _, evt := range msg.events {
 			frame := eventToResponseFrame(evt)
 			mdl, _ := m.handleFrame(frame)
 			m = mdl.(model)
 		}
-		m.turn = nil
+		m.session.turn = nil
+		// Live turns get a trailing statusline that visually separates them
+		// from the next prompt; replayed history has no stats to produce
+		// one, so add an explicit spacer instead.
+		m.appendEntry(&transcript.TranscriptEntry{Type: transcript.EntrySpacer, Raw: ""})
 	}
 	return m
 }
@@ -362,10 +373,10 @@ func (m model) handleCmdResult(msg cmdResultMsg) model {
 		return m
 	}
 	if msg.frame.SessionID != "" {
-		m.sessionID = msg.frame.SessionID
+		m.session.id = msg.frame.SessionID
 	}
 	if name, ok := trackedSessionName(msg.cmd, msg.frame); ok {
-		m.sessionName = name
+		m.session.name = name
 	}
 
 	// tool_allow/tool_deny are silenced — the refresh command that
@@ -394,67 +405,109 @@ func (m model) handleCmdResult(msg cmdResultMsg) model {
 	return m
 }
 
+// handleFrame dispatches an inbound frame to the handler for its type. It
+// owns only cross-cutting concerns — replying to proxied client requests
+// and dropping frames for sessions other than the one currently shown —
+// leaving each frame type's own state changes to its handle*Frame method.
 func (m model) handleFrame(frame protocol.ResponseFrame) (tea.Model, tea.Cmd) {
-	if frame.SessionID != "" {
-		m.sessionID = frame.SessionID
-	}
-
 	if frame.Type == protocol.TypeReq {
 		_ = m.client.ReplyUnsupportedClientRequest(frame)
 		return m, waitFrame(m.ctx, m.client)
 	}
 
+	// The server fans frames for other sessions across this same socket
+	// (background activity, welcome auto-subscribe). Only frames for the
+	// session currently shown should drive turn state — anything else is
+	// dropped here instead of corrupting or panicking the active turn.
+	if frame.SessionID != "" && m.session.id != "" && frame.SessionID != m.session.id {
+		return m, waitFrame(m.ctx, m.client)
+	}
+
+	if frame.SessionID != "" {
+		m.session.id = frame.SessionID
+	}
+
 	switch frame.Type {
 	case protocol.TypeChat:
-		// History replay only — live chat frames aren't sent to
-		// handleFrame. Echo the user prompt just like submit() does.
-		if frame.Text != "" {
-			m.appendUserPrompt(frame.Text)
-		}
+		m = m.handleChatFrame(frame)
 	case protocol.TypeDelta:
-		m.spinner.setLabel("Writing response")
-		if frame.Text != "" && m.turn.active() {
-			m.turn.addDelta(frame.Text, m.appendEntry, m.updateStreamingEntry)
-		}
+		m = m.handleDeltaFrame(frame)
 	case protocol.TypeTool:
-		if !m.turn.active() {
-			break
-		}
-		m.turn.sawTool = true
-		if frame.Status == protocol.StatusStart {
-			m.turn.recordToolStart(frame)
-			m.spinner.setLabel(m.turn.toolsLabel())
-		} else {
-			// Finalise any streaming prose as markdown before the tool call.
-			m.turn.streamFinalize(m.updateStreamingEntry)
-
-			startFrame := m.turn.finishTool(frame.ID)
-
-			if out := renderToolEvent(startFrame, frame); out != "" {
-				m.turn.appendToolCall(m.appendEntry, frame, startFrame)
-			}
-			m.spinner.setLabel(m.turn.toolsLabel())
-		}
-	case protocol.TypeUsage:
+		m = m.handleToolFrame(frame)
 	case protocol.TypeDone:
-		m.turn.streamFinalizeOrAppend(frame.Text, m.appendEntry, m.updateStreamingEntry)
-		if frame.Error != "" {
-			m.appendError("error: " + frame.Error)
-		} else if frame.Cancelled {
-			m.appendLine("[cancelled]")
-		}
-		if s := renderStatusline(frame.Stats); s != "" {
-			m.appendStatusLine(s)
-		}
-		m.turn = nil
 		var cmd tea.Cmd
-		if m.sessionName == "" {
-			cmd = autoRenameCmd(m.ctx, m.client, m.sessionID)
-		}
+		m, cmd = m.handleDoneFrame(frame)
 		return m, cmd
 	}
 
 	return m, waitFrame(m.ctx, m.client)
+}
+
+// handleChatFrame echoes a replayed user prompt. Live chat frames aren't
+// sent to handleFrame — this only fires during history replay.
+func (m model) handleChatFrame(frame protocol.ResponseFrame) model {
+	if frame.Text != "" {
+		m.appendUserPrompt(frame.Text)
+	}
+	return m
+}
+
+// handleDeltaFrame appends or extends the in-flight assistant text as
+// streamed prose arrives.
+func (m model) handleDeltaFrame(frame protocol.ResponseFrame) model {
+	m.spinner.setLabel("Writing response")
+	if frame.Text != "" && m.session.turn.active() {
+		m.session.turn.addDelta(frame.Text, m.appendEntry, m.updateStreamingEntry)
+	}
+	return m
+}
+
+// handleToolFrame records a tool call's start, or renders its completion
+// once the matching start/finish pair is available.
+func (m model) handleToolFrame(frame protocol.ResponseFrame) model {
+	if !m.session.turn.active() {
+		return m
+	}
+	m.session.turn.sawTool = true
+	if frame.Status == protocol.StatusStart {
+		m.session.turn.recordToolStart(frame)
+		m.spinner.setLabel(m.session.turn.toolsLabel())
+		return m
+	}
+
+	// Finalise any streaming prose as markdown before the tool call.
+	m.session.turn.streamFinalize(m.updateStreamingEntry)
+
+	startFrame := m.session.turn.finishTool(frame.ID)
+	if out := renderToolEvent(startFrame, frame); out != "" {
+		m.session.turn.appendToolCall(m.appendEntry, frame, startFrame)
+	}
+	m.spinner.setLabel(m.session.turn.toolsLabel())
+	return m
+}
+
+// handleDoneFrame finalises the in-flight turn: renders any trailing text,
+// surfaces errors/cancellation, appends the turn's statusline, and clears
+// turn state. It kicks off auto-rename for still-unnamed sessions.
+func (m model) handleDoneFrame(frame protocol.ResponseFrame) (model, tea.Cmd) {
+	if !m.session.turn.active() {
+		return m, nil
+	}
+	m.session.turn.streamFinalizeOrAppend(frame.Text, m.appendEntry, m.updateStreamingEntry)
+	if frame.Error != "" {
+		m.appendError("error: " + frame.Error)
+	} else if frame.Cancelled {
+		m.appendLine("[cancelled]")
+	}
+	if s := renderStatusline(frame.Stats); s != "" {
+		m.appendStatusLine(s)
+	}
+	m.session.turn = nil
+	var cmd tea.Cmd
+	if m.session.name == "" {
+		cmd = autoRenameCmd(m.ctx, m.client, m.session.id)
+	}
+	return m, cmd
 }
 
 func (m model) handleCopyToClipboard(msg copyToClipboardMsg) (tea.Model, tea.Cmd) {
@@ -475,7 +528,7 @@ func (m model) View() string {
 	}
 
 	var status string
-	if m.turn.active() {
+	if m.session.turn.active() {
 		status = m.spinner.view()
 	} else {
 		status = dim("ready")

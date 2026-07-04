@@ -16,7 +16,7 @@ func bootCmd(ctx context.Context, client backend.Backend, cfg Config) tea.Cmd {
 			return bootMsg{err: fmt.Errorf("read welcome: %w", err)}
 		}
 
-		summary, sessionID, events, resumed, err := resumeOrCreateSession(ctx, client)
+		summary, sessionID, events, resumed, err := resumeOrCreateSession(ctx, client, cfg.CWD)
 		if err != nil {
 			return bootMsg{err: fmt.Errorf("resume/create session: %w", err)}
 		}
@@ -42,8 +42,13 @@ func bootCmd(ctx context.Context, client backend.Backend, cfg Config) tea.Cmd {
 	}
 }
 
-func resumeOrCreateSession(ctx context.Context, client backend.Backend) (*protocol.SessionSummary, string, []map[string]any, bool, error) {
-	recent, err := client.MostRecentSession(ctx)
+// resumeOrCreateSession resumes the most recently updated session whose
+// stored cwd matches the current process's cwd. Sessions from other
+// directories are left alone — so switching project directories resumes
+// that directory's own history instead of dumping you into an unrelated
+// session — and a fresh session is created if none match.
+func resumeOrCreateSession(ctx context.Context, client backend.Backend, cwd string) (*protocol.SessionSummary, string, []map[string]any, bool, error) {
+	recent, err := mostRecentSessionForCWD(ctx, client, cwd)
 	if err != nil {
 		return nil, "", nil, false, err
 	}
@@ -57,6 +62,35 @@ func resumeOrCreateSession(ctx context.Context, client backend.Backend) (*protoc
 		return nil, "", nil, false, err
 	}
 	return summary, sessionID, events, true, nil
+}
+
+// mostRecentSessionForCWD returns the newest session (by updated_at) whose
+// stored client_cwd matches cwd, or nil if none match. If cwd is unknown,
+// it falls back to the newest session overall rather than discarding data.
+func mostRecentSessionForCWD(ctx context.Context, client backend.Backend, cwd string) (map[string]any, error) {
+	if cwd == "" {
+		return client.MostRecentSession(ctx)
+	}
+	sessions, err := client.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var best map[string]any
+	for _, s := range sessions {
+		sessionCWD, _ := s["client_cwd"].(string)
+		if sessionCWD != cwd {
+			continue
+		}
+		if best == nil || updatedAt(s) > updatedAt(best) {
+			best = s
+		}
+	}
+	return best, nil
+}
+
+func updatedAt(session map[string]any) string {
+	s, _ := session["updated_at"].(string)
+	return s
 }
 
 func waitFrame(ctx context.Context, client backend.Backend) tea.Cmd {

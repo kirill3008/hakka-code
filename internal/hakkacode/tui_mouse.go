@@ -95,13 +95,13 @@ func (m model) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 func (m model) dispatchClickAction(action transcript.ClickAction) (tea.Model, tea.Cmd) {
 	switch action.Action {
 	case protocol.ActionSessionSwitch:
-		return m, execRemoteCmd(m.ctx, m.client, m.sessionID, protocol.CmdGetSession, map[string]any{"id": action.Payload})
+		return m, execRemoteCmd(m.ctx, m.client, m.session.id, protocol.CmdGetSession, map[string]any{"id": action.Payload})
 	case protocol.ActionModelSwitch:
-		return m, execRemoteCmd(m.ctx, m.client, m.sessionID, protocol.CmdModelSwitch, map[string]any{"name": action.Payload})
+		return m, execRemoteCmd(m.ctx, m.client, m.session.id, protocol.CmdModelSwitch, map[string]any{"name": action.Payload})
 	case protocol.ActionToolAllow:
-		return m, toolToggleThenRefresh(m.ctx, m.client, m.sessionID, protocol.CmdToolAllow, action.Payload)
+		return m, toolToggleThenRefresh(m.ctx, m.client, m.session.id, protocol.CmdToolAllow, action.Payload)
 	case protocol.ActionToolDeny:
-		return m, toolToggleThenRefresh(m.ctx, m.client, m.sessionID, protocol.CmdToolDeny, action.Payload)
+		return m, toolToggleThenRefresh(m.ctx, m.client, m.session.id, protocol.CmdToolDeny, action.Payload)
 	case protocol.ActionCopy:
 		return m, func() tea.Msg { return copyToClipboardMsg{text: action.Payload} }
 	}

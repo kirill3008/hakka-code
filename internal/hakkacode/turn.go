@@ -2,7 +2,6 @@ package hakkacode
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -288,12 +287,13 @@ func toolInfoSuffix(name string, args json.RawMessage, result string) string {
 	return " " + strings.Join(parts, " ")
 }
 
-// readFileInfo extracts the path and line range from a read_file call.
+// readFileInfo extracts the line range from a read_file call. The path
+// itself is already shown by the snippet, so this only adds line info.
 // Args: {"path": "...", "range_start": N, "range_end": M}
 // Result: the file content as a string.
-// Returns e.g. ""/path/to/file" lines 10-25".
+// Returns e.g. "lines 10-25".
 func readFileInfo(args json.RawMessage, result string) string {
-	if len(args) == 0 {
+	if len(args) == 0 || result == "" {
 		return ""
 	}
 	var p struct {
@@ -304,10 +304,6 @@ func readFileInfo(args json.RawMessage, result string) string {
 	}
 	if err := json.Unmarshal(args, &p); err != nil || p.Path == "" {
 		return ""
-	}
-
-	if result == "" {
-		return fmt.Sprintf("%q", p.Path)
 	}
 
 	// Count lines from the actual result.
@@ -323,14 +319,14 @@ func readFileInfo(args json.RawMessage, result string) string {
 		if start < 1 {
 			start = 1
 		}
-		return dimf("%q lines %d-%d", p.Path, start, p.RangeEnd)
+		return dimf("lines %d-%d", start, p.RangeEnd)
 	}
 
 	if p.MaxBytes > 0 && len(result) >= p.MaxBytes {
-		return dimf("%q %d lines (truncated)", p.Path, totalLines)
+		return dimf("%d lines (truncated)", totalLines)
 	}
 
-	return dimf("%q %d lines", p.Path, totalLines)
+	return dimf("%d lines", totalLines)
 }
 
 // editFileInfo computes diff line stats from an edit_file call's args.

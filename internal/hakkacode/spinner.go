@@ -48,7 +48,7 @@ func (s *spinnerWidget) active() bool {
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // formatDuration renders a duration as a compact human-readable string,
-// e.g. "3s", "2m15s", "1h3m".
+// e.g. "3s", "2m 15s", "1h 3m".
 func formatDuration(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int(d.Seconds()))
@@ -59,14 +59,14 @@ func formatDuration(d time.Duration) string {
 		if s == 0 {
 			return fmt.Sprintf("%dm", m)
 		}
-		return fmt.Sprintf("%dm%ds", m, s)
+		return fmt.Sprintf("%dm %ds", m, s)
 	}
 	h := int(d.Hours())
 	m := int(d.Minutes()) % 60
 	if m == 0 {
 		return fmt.Sprintf("%dh", h)
 	}
-	return fmt.Sprintf("%dh%dm", h, m)
+	return fmt.Sprintf("%dh %dm", h, m)
 }
 
 // spinTick returns a tea.Cmd that fires a spinTickMsg every 100ms.
