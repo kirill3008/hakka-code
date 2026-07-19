@@ -55,7 +55,7 @@ func TestRenderToolEventErrShowsFullDetail(t *testing.T) {
 		Error:  "pattern not found in foo.go",
 	}
 	out := renderToolEvent(startFrame, frame)
-	if !strings.Contains(out, "- bar") || !strings.Contains(out, "+ baz") {
+	if !strings.Contains(out, "-bar") || !strings.Contains(out, "+baz") {
 		t.Fatalf("expected diff lines from the buffered start frame, got: %q", out)
 	}
 	if !strings.Contains(out, "✗ err") {
@@ -82,7 +82,7 @@ func TestRenderToolEventErrWithoutStartFrame(t *testing.T) {
 		t.Fatalf("expected error message: %q", out)
 	}
 	// Diff should not appear without a start frame.
-	if strings.Contains(out, "- ") || strings.Contains(out, "+ ") {
+	if strings.Contains(out, "\n  -") || strings.Contains(out, "\n  +") {
 		t.Fatalf("expected no diff lines without start frame: %q", out)
 	}
 }

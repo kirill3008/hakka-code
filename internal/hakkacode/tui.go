@@ -478,7 +478,7 @@ func (m model) handleToolFrame(frame protocol.ResponseFrame) model {
 	// Finalise any streaming prose as markdown before the tool call.
 	m.session.turn.streamFinalize(m.updateStreamingEntry)
 
-	startFrame := m.session.turn.finishTool(frame.ID)
+	startFrame := m.session.turn.finishTool(frame)
 	if out := renderToolEvent(startFrame, frame); out != "" {
 		m.session.turn.appendToolCall(m.appendEntry, frame, startFrame)
 	}

@@ -18,10 +18,12 @@ import (
 // turn ends (done/cancelled/error) the state is consumed and set back to
 // nil.
 type turnState struct {
-	toolStarts     map[string]protocol.ResponseFrame
-	toolStartTimes map[string]time.Time
-	sawTool        bool
-	stream         *streamingText // nil when no deltas have arrived yet
+	toolStarts       map[string]protocol.ResponseFrame
+	toolStartTimes   map[string]time.Time
+	toolStartTS      map[string]int64 // server-provided start timestamps (ms since epoch)
+	toolFinishTS     map[string]int64 // server-provided finish timestamps (ms since epoch)
+	sawTool          bool
+	stream           *streamingText // nil when no deltas have arrived yet
 
 	// lazy, when true, skips markdown rendering during addDelta and
 	// defers it to streamFinalize. Used for history replay during boot
@@ -42,6 +44,8 @@ func newTurnState() *turnState {
 	return &turnState{
 		toolStarts:     make(map[string]protocol.ResponseFrame),
 		toolStartTimes: make(map[string]time.Time),
+		toolStartTS:    make(map[string]int64),
+		toolFinishTS:   make(map[string]int64),
 	}
 }
 
@@ -156,20 +160,29 @@ func (ts *turnState) streamFinalizeOrAppend(
 
 // recordToolStart remembers the start frame and wall-clock time for a
 // tool invocation so it can be paired with the completion frame later.
+// If the frame carries a server-provided timestamp (ts), it is stored
+// separately for accurate server-side duration calculation.
 func (ts *turnState) recordToolStart(frame protocol.ResponseFrame) {
 	if frame.ID != "" {
 		ts.toolStarts[frame.ID] = frame
 		ts.toolStartTimes[frame.ID] = time.Now()
+		if frame.Timestamp > 0 {
+			ts.toolStartTS[frame.ID] = frame.Timestamp
+		}
 	}
 }
 
 // finishTool drains the pending tool start for the given id and returns
 // it (so the caller can extract args/snippet), then removes it from the
-// map. Returns nil if there was no matching start.
-func (ts *turnState) finishTool(id string) *protocol.ResponseFrame {
-	start, ok := ts.toolStarts[id]
-	delete(ts.toolStarts, id)
-	delete(ts.toolStartTimes, id)
+// map. Also records the server-provided finish timestamp if available.
+// Returns nil if there was no matching start.
+func (ts *turnState) finishTool(frame protocol.ResponseFrame) *protocol.ResponseFrame {
+	start, ok := ts.toolStarts[frame.ID]
+	delete(ts.toolStarts, frame.ID)
+	delete(ts.toolStartTimes, frame.ID)
+	if frame.Timestamp > 0 {
+		ts.toolFinishTS[frame.ID] = frame.Timestamp
+	}
 	if ok {
 		return &start
 	}
@@ -178,7 +191,17 @@ func (ts *turnState) finishTool(id string) *protocol.ResponseFrame {
 
 // toolDuration returns the elapsed wall-clock time since the tool start
 // frame was recorded. Returns zero if the id was never recorded.
+//
+// When both server-provided start and finish timestamps are available
+// (history replays), the duration is computed from those for accuracy.
+// Otherwise falls back to client-side time.Since (live turns).
 func (ts *turnState) toolDuration(id string) time.Duration {
+	// Prefer server-side timestamps when both start and finish are known.
+	if start, ok := ts.toolStartTS[id]; ok {
+		if finish, ok := ts.toolFinishTS[id]; ok && finish > start {
+			return time.Duration(finish-start) * time.Millisecond
+		}
+	}
 	t, ok := ts.toolStartTimes[id]
 	if !ok {
 		return 0
@@ -195,6 +218,8 @@ func (ts *turnState) toolsLabel() string {
 }
 
 // appendToolCall creates and appends a tool call transcript entry.
+// For successful edit_file calls, the full diff is included in the raw
+// text so expanding the entry shows what changed.
 func (ts *turnState) appendToolCall(
 	appendFn func(e *transcript.TranscriptEntry),
 	frame protocol.ResponseFrame,
@@ -225,6 +250,9 @@ func (ts *turnState) appendToolCall(
 	if d := ts.toolDuration(frame.ID); d > 0 {
 		extra += " " + dimf("(%s)", formatDuration(d))
 	}
+	// Clean up timestamp maps for this tool ID.
+	delete(ts.toolStartTS, frame.ID)
+	delete(ts.toolFinishTS, frame.ID)
 
 	var raw string
 	if status == transcript.ToolOK {
@@ -234,11 +262,31 @@ func (ts *turnState) appendToolCall(
 			raw = "✓ " + name
 		}
 		raw += extra
+
+		// For successful edit_file, include the diff in the raw text so
+		// expanding the entry shows what changed.
+		if name == "edit_file" && startFrame != nil {
+			if diff := renderEditFileDiff(startFrame.Args); diff != "" {
+				raw += "\n" + strings.TrimRight(diff, "\n")
+			}
+		}
+		// For successful write_file, include a content preview.
+		if name == "write_file" && startFrame != nil {
+			if preview := renderWriteFilePreview(startFrame.Args); preview != "" {
+				raw += "\n" + strings.TrimRight(preview, "\n")
+			}
+		}
 	} else {
 		if snippet != "" {
 			raw = "✗ " + name + " · " + snippet + ": " + frame.Error
 		} else {
 			raw = "✗ " + name + ": " + frame.Error
+		}
+		// For failed edit_file, include the diff.
+		if name == "edit_file" && startFrame != nil {
+			if diff := renderEditFileDiff(startFrame.Args); diff != "" {
+				raw += "\n" + strings.TrimRight(diff, "\n")
+			}
 		}
 	}
 

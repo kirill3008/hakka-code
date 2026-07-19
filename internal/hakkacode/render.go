@@ -175,6 +175,14 @@ func renderToolEvent(startFrame *protocol.ResponseFrame, frame protocol.Response
 		} else {
 			fmt.Fprintf(&b, "✓ %s\n", name)
 		}
+		// For successful edit_file, include the diff.
+		if name == "edit_file" && startFrame != nil {
+			b.WriteString(renderEditFileDiff(startFrame.Args))
+		}
+		// For successful write_file, include a preview.
+		if name == "write_file" && startFrame != nil {
+			b.WriteString(renderWriteFilePreview(startFrame.Args))
+		}
 	case "err":
 		if snippet != "" {
 			fmt.Fprintf(&b, "\n⏺ %s · %s\n", name, snippet)
@@ -224,11 +232,12 @@ func toolSnippet(frame protocol.ResponseFrame) string {
 const (
 	diffMaxLines = 20
 	diffMaxChars = 4000
+	diffContext  = 2 // lines of surrounding context in unified diff
 )
 
-// renderEditFileDiff shows a compact +/- preview of an edit_file call's
-// old/new arguments, so the user can eyeball the change without staring
-// at raw JSON.
+// renderEditFileDiff shows a compact unified-diff preview of an edit_file
+// call's old/new arguments, so the user can eyeball the change without
+// staring at raw JSON. Uses git-style unified diff with minimal context.
 func renderEditFileDiff(args json.RawMessage) string {
 	if len(args) == 0 {
 		return ""
@@ -240,49 +249,164 @@ func renderEditFileDiff(args json.RawMessage) string {
 	if err := json.Unmarshal(args, &p); err != nil {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString(diffLines("-", p.Old, sgrRed))
-	b.WriteString(diffLines("+", p.New, sgrGreen))
-	return b.String()
+	return unifiedDiff(p.Old, p.New, diffContext)
 }
 
-// renderWriteFilePreview shows the first few lines of a write_file call's
-// content argument.
-func renderWriteFilePreview(args json.RawMessage) string {
-	if len(args) == 0 {
-		return ""
-	}
-	var p struct {
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return ""
-	}
-	return diffLines(" ", p.Content, sgrDim)
+// Diff types for unified diff generation.
+type diffOp int
+
+const (
+	diffSame diffOp = iota
+	diffDel
+	diffIns
+)
+
+type diffEdit struct {
+	op    diffOp
+	line  string
+	oldN  int // 1-based line number in old (0 = none)
+	newN  int // 1-based line number in new (0 = none)
 }
 
-func diffLines(prefix, text, color string) string {
-	if text == "" {
+// unifiedDiff produces a git-style unified diff between oldText and newText
+// with the given number of context lines around each change.
+func unifiedDiff(oldText, newText string, context int) string {
+	oldLines := strings.Split(oldText, "\n")
+	newLines := strings.Split(newText, "\n")
+
+	edits := diffLCS(oldLines, newLines)
+
+	// Find change boundaries: indices in edits where changes start/end.
+	type changeRange struct {
+		start, end int // indices into edits (inclusive start, exclusive end)
+	}
+	var changes []changeRange
+	for i := 0; i < len(edits); i++ {
+		if edits[i].op != diffSame {
+			start := i
+			for i < len(edits) && edits[i].op != diffSame {
+				i++
+			}
+			changes = append(changes, changeRange{start, i})
+			i-- // loop will increment
+		}
+	}
+
+	if len(changes) == 0 {
 		return ""
 	}
-	if len(text) > diffMaxChars {
-		text = text[:diffMaxChars] + "\n[TRUNCATED]"
+
+	// Merge changes that are close enough (within 2*context of each other).
+	var merged []changeRange
+	current := changes[0]
+	for i := 1; i < len(changes); i++ {
+		gap := changes[i].start - current.end
+		if gap <= 2*context {
+			// Merge: extend current to cover both.
+			current.end = changes[i].end
+		} else {
+			merged = append(merged, current)
+			current = changes[i]
+		}
 	}
-	lines := strings.Split(text, "\n")
-	shown := lines
-	extra := 0
-	if len(lines) > diffMaxLines {
-		shown = lines[:diffMaxLines]
-		extra = len(lines) - diffMaxLines
-	}
+	merged = append(merged, current)
+
+	// Render each merged hunk.
 	var b strings.Builder
-	for _, l := range shown {
-		fmt.Fprintf(&b, "  %s%s %s%s\n", color, prefix, l, sgrReset)
+	for _, m := range merged {
+		// Expand with context.
+		hunkStart := m.start - context
+		if hunkStart < 0 {
+			hunkStart = 0
+		}
+		hunkEnd := m.end + context
+		if hunkEnd > len(edits) {
+			hunkEnd = len(edits)
+		}
+
+		hunkEdits := edits[hunkStart:hunkEnd]
+
+		// Compute hunk header line numbers.
+		first := hunkEdits[0]
+		last := hunkEdits[len(hunkEdits)-1]
+		oldStart := first.oldN
+		newStart := first.newN
+		if oldStart == 0 {
+			oldStart = 1
+		}
+		if newStart == 0 {
+			newStart = 1
+		}
+		oldCount := last.oldN - first.oldN + 1
+		newCount := last.newN - first.newN + 1
+		if oldCount < 1 {
+			oldCount = 1
+		}
+		if newCount < 1 {
+			newCount = 1
+		}
+
+		fmt.Fprintf(&b, "  %s@@ -%d,%d +%d,%d @@%s\n",
+			sgrCyan, oldStart, oldCount, newStart, newCount, sgrReset)
+
+		for _, e := range hunkEdits {
+			line := truncateLine(e.line, 120)
+			switch e.op {
+			case diffSame:
+				fmt.Fprintf(&b, "  %s %s%s\n", sgrDim, line, sgrReset)
+			case diffDel:
+				fmt.Fprintf(&b, "  %s-%s%s\n", sgrRed, line, sgrReset)
+			case diffIns:
+				fmt.Fprintf(&b, "  %s+%s%s\n", sgrGreen, line, sgrReset)
+			}
+		}
 	}
-	if extra > 0 {
-		fmt.Fprintf(&b, "  %s... (%d more lines)%s\n", sgrDim, extra, sgrReset)
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// diffLCS computes a simple LCS-based diff between two string slices.
+// Returns a sequence of edit operations.
+func diffLCS(a, b []string) []diffEdit {
+	// Build LCS table.
+	m, n := len(a), len(b)
+	dp := make([][]int, m+1)
+	for i := range dp {
+		dp[i] = make([]int, n+1)
 	}
-	return b.String()
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if a[i-1] == b[j-1] {
+				dp[i][j] = dp[i-1][j-1] + 1
+			} else if dp[i-1][j] >= dp[i][j-1] {
+				dp[i][j] = dp[i-1][j]
+			} else {
+				dp[i][j] = dp[i][j-1]
+			}
+		}
+	}
+
+	// Backtrack to produce edit sequence.
+	var edits []diffEdit
+	i, j := m, n
+	var backtrack func(i, j int)
+	backtrack = func(i, j int) {
+		if i == 0 && j == 0 {
+			return
+		}
+		if i > 0 && j > 0 && a[i-1] == b[j-1] {
+			backtrack(i-1, j-1)
+			edits = append(edits, diffEdit{op: diffSame, line: a[i-1], oldN: i, newN: j})
+		} else if j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]) {
+			backtrack(i, j-1)
+			edits = append(edits, diffEdit{op: diffIns, line: b[j-1], oldN: 0, newN: j})
+		} else if i > 0 {
+			backtrack(i-1, j)
+			edits = append(edits, diffEdit{op: diffDel, line: a[i-1], oldN: i, newN: 0})
+		}
+	}
+	backtrack(i, j)
+	return edits
 }
 
 func renderData(cmd string, data map[string]any) string {
@@ -352,4 +476,96 @@ func compactJSONStr(raw string) string {
 		return string(b[:157]) + "..."
 	}
 	return string(b)
+}
+
+// renderWriteFilePreview shows the first few lines of a write_file call's
+// content argument.
+func renderWriteFilePreview(args json.RawMessage) string {
+	if len(args) == 0 {
+		return ""
+	}
+	var p struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return ""
+	}
+	return previewLines(p.Content, " ", sgrDim)
+}
+
+// previewLines shows the first few lines of text with a prefix and color.
+func previewLines(text, prefix, color string) string {
+	if text == "" {
+		return ""
+	}
+	if len(text) > diffMaxChars {
+		text = text[:diffMaxChars] + "\n[TRUNCATED]"
+	}
+	lines := strings.Split(text, "\n")
+	shown := lines
+	extra := 0
+	if len(lines) > diffMaxLines {
+		shown = lines[:diffMaxLines]
+		extra = len(lines) - diffMaxLines
+	}
+	var b strings.Builder
+	for _, l := range shown {
+		fmt.Fprintf(&b, "  %s%s %s%s\n", color, prefix, l, sgrReset)
+	}
+	if extra > 0 {
+		fmt.Fprintf(&b, "  %s... (%d more lines)%s\n", sgrDim, extra, sgrReset)
+	}
+	return b.String()
+}
+
+// truncateLine truncates a line to maxCols visible characters (excluding
+// ANSI escape codes) to prevent viewport overflow. Appends "…" if truncated.
+func truncateLine(line string, maxCols int) string {
+	// Strip ANSI codes for length calculation.
+	clean := stripANSI(line)
+	if len(clean) <= maxCols {
+		return line
+	}
+	// Find the truncation point in the original string.
+	// We need to count visible characters, skipping ANSI codes.
+	var visible int
+	truncAt := len(line)
+	for i := 0; i < len(line); {
+		if line[i] == '\033' {
+			// Skip ANSI escape sequence.
+			end := strings.IndexByte(line[i:], 'm')
+			if end < 0 {
+				break
+			}
+			i += end + 1
+			continue
+		}
+		visible++
+		if visible > maxCols-1 { // -1 for "…"
+			truncAt = i
+			break
+		}
+		i++
+	}
+	return line[:truncAt] + "…" + sgrReset
+}
+
+// stripANSI removes ANSI escape sequences from a string.
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '\033' {
+			end := strings.IndexByte(s[i:], 'm')
+			if end < 0 {
+				b.WriteByte(s[i])
+				i++
+				continue
+			}
+			i += end + 1
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
 }

@@ -21,6 +21,11 @@ func eventToResponseFrame(evt map[string]any) protocol.ResponseFrame {
 
 	frame := protocol.ResponseFrame{Type: typ}
 
+	// Extract server-provided timestamp (milliseconds since epoch).
+	if ts, ok := evt["ts"].(float64); ok {
+		frame.Timestamp = int64(ts)
+	}
+
 	switch typ {
 	case "chat":
 		frame.Type = protocol.TypeChat

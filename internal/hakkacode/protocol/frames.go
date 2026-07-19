@@ -39,6 +39,7 @@ type TurnStats struct {
 type ResponseFrame struct {
 	Type      string `json:"type"`
 	SessionID string `json:"session_id,omitempty"`
+	Timestamp int64  `json:"ts,omitempty"` // Unix timestamp in milliseconds
 
 	// --- "delta" / "done" fields ---
 	Text string `json:"text,omitempty"`
